@@ -22,11 +22,17 @@ const HIGHLIGHT_COLORS: Dictionary = {
 	"deploy": Color(0.30, 0.80, 0.40),
 	"target": Color(0.95, 0.80, 0.25),
 	"active": Color(1.0, 1.0, 1.0),
+	"eligible": Color(0.95, 0.80, 0.25),
+	"ineligible": Color(0.55, 0.48, 0.48),
 }
 
 var hp_bar: ProgressBar
 var stripe: ColorRect
 var terrain_tag: Label
+var movement_marker: Label
+var attack_marker: Label
+var target_marker: Label
+var tutorial_marker: Label
 var effect_tween: Tween
 
 func _init() -> void:
@@ -54,10 +60,45 @@ func _init() -> void:
 	terrain_tag.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
 	terrain_tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(terrain_tag)
+	var markers := HBoxContainer.new()
+	markers.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	markers.position = Vector2(9, 2)
+	markers.add_theme_constant_override("separation", 3)
+	markers.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(markers)
+	movement_marker = _marker("M", Color(0.55, 0.78, 1.0))
+	attack_marker = _marker("A", Color(1.0, 0.55, 0.50))
+	target_marker = _marker("", Color.WHITE)
+	tutorial_marker = _marker("GO", Color(0.55, 1.0, 0.9))
+	markers.add_child(movement_marker)
+	markers.add_child(attack_marker)
+	markers.add_child(target_marker)
+	markers.add_child(tutorial_marker)
 
-func show_state(terrain: String, unit: UnitState, highlight: String, seeded: bool = false) -> void:
+func _marker(value: String, color: Color) -> Label:
+	var label := Label.new()
+	label.text = value
+	label.add_theme_font_size_override("font_size", 13)
+	label.add_theme_color_override("font_color", color)
+	label.add_theme_color_override("font_outline_color", Color.BLACK)
+	label.add_theme_constant_override("outline_size", 4)
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return label
+
+func show_state(terrain: String, unit: UnitState, highlight: String, seeded: bool = false, range_preview: Dictionary = {}, target_reason: String = "", tutorial_target: bool = false) -> void:
 	var color: Color = TERRAIN_COLORS.get(terrain, Color.GRAY)
 	tooltip_text = "%s: %s" % [terrain, str(BoardState.TERRAIN_DESCRIPTIONS.get(terrain, ""))]
+	movement_marker.visible = bool(range_preview.get("move", false))
+	attack_marker.visible = bool(range_preview.get("attack", false))
+	target_marker.visible = highlight in ["eligible", "ineligible"]
+	tutorial_marker.visible = tutorial_target
+	if target_marker.visible:
+		target_marker.text = "OK" if highlight == "eligible" else "X"
+		target_marker.add_theme_color_override("font_color", Color(1.0, 0.9, 0.4) if highlight == "eligible" else Color(1.0, 0.65, 0.65))
+		tooltip_text += "\n" + ("Eligible target" if target_reason.is_empty() else target_reason)
+	if highlight == "" and (movement_marker.visible or attack_marker.visible):
+		var preview_color: Color = Color(0.65, 0.35, 0.75) if movement_marker.visible and attack_marker.visible else (HIGHLIGHT_COLORS["move"] if movement_marker.visible else HIGHLIGHT_COLORS["attack"])
+		color = color.lerp(preview_color, 0.35)
 	if highlight != "":
 		color = color.lerp(HIGHLIGHT_COLORS[highlight], 0.55)
 	for style_name in ["normal", "hover", "pressed", "disabled", "focus"]:

@@ -7,6 +7,7 @@ The simulation (`scripts/engine`, `scripts/data`) is independent of the UI. Both
 
 Open this folder as a project in Godot 4.7.2 and press **F5**. The main menu offers:
 
+- **Tutorial** - play a repeatable, scripted training scenario covering supply, deployment, equipment, promotion, tactics, activation, movement, combat, turns and objective scoring. It uses a prepared mid-match position and extra supply; the opponent passes its turn. Follow the marked tile and on-screen instructions. On small screens, close the enlarged lesson to use the board; the **Tutorial** button reopens it. **Menu** exits early; finishing returns to the menu.
 - **Local Play** - choose two-player hot-seat, four-player free-for-all, or play against the computer (Easy / Normal / Hard). Hot-seat matches show a handoff screen between turns.
 - **Online Play** - create or join a private room.
 - **Deck Builder** - filter the collection by category, class, weapon or name; click a collection card to add it, a deck card to remove it. A deck needs exactly 40 cards, max 3 copies each (the 22/10/8 unit/equipment/tactic mix is advice only). Decks save as card-id JSON in `user://decks/` (Godot's user data folder). Each seat can pick the starter deck or any saved legal deck on the main menu.
@@ -40,6 +41,12 @@ godot --headless --path . --script res://tests/network_smoke_client.gd -- --addr
 
 Hover a hand card or a unit to see it in the card inspector (stats, terrain, equipment, effects, bonds). Player panels show commander HP, supply, victory points, card counts, and fallen units; scroll the panels if needed. On small screens, **Players** opens a larger, scrollable status view. Supply above the normal maximum is marked as a bonus. Cells show HP bars and owner stripes. Local and online actions have short cosmetic effects for movement, combat, cards, status and terrain effects, scoring, turns, and victory; the server remains authoritative and animations never affect outcomes. **Reduce motion** on the main menu or in a match replaces moving effects with static feedback. The setting lasts for the current game session. Updated clients and server are needed for online action animations.
 
+Player actions show a confirmation dialog by default, including terrain setup, activation, movement, attacks, cards, waiting and phase changes. Cancel keeps the current selection so you can choose another target. Turn **Confirm actions** off on the main menu or during a match to act immediately; this preference lasts for the current application session. AI actions do not require confirmation.
+
+Hover a unit to preview its potential movement (**M**) and attack coverage (**A**) from its current position. Movement accounts for terrain and occupied tiles; attack coverage includes every tile within range, not just legal enemy targets. These previews do not imply the unit can act this turn. Selecting equipment or a promotion marks currently eligible units **OK** and unavailable units **X**; hover an unavailable unit for the reason.
+
+The outlined phase controls advance to command or end the turn; **Wait** ends the active unit's activation. Unavailable controls are muted.
+
 ## Play
 
 - 7x7 board; three objectives in the center column. Commanders start at the middle of each home column.
@@ -67,6 +74,7 @@ Hover a hand card or a unit to see it in the card inspector (stats, terrain, equ
 godot --headless --path . --script res://tests/test_runner.gd
 godot --headless --path . --script res://tests/four_player_ui_smoke.gd
 godot --headless --path . --script res://tests/menu_ui_smoke.gd
+godot --headless --path . --script res://tests/tutorial_ui_smoke.gd
 ```
 
 Covers the 30-card collection and deck legality, turns and supply, movement, combat, equipment, tactics, promotion, support, Fallen Zone, victory conditions, invalid-action rejection, and full AI-vs-AI matches (valid actions only, deterministic per seed).

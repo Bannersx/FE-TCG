@@ -13,3 +13,5 @@ static var armies: Array[String] = [ArmyCatalog.IRONCREST_ID, ArmyCatalog.ASHEN_
 # Terrain placements each player makes before the match; 0 skips the setup phase.
 static var setup_tiles: int = 0
 static var reduce_motion: bool = false
+static var confirm_actions: bool = true
+static var tutorial_mode: bool = false

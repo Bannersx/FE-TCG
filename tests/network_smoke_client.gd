@@ -12,6 +12,8 @@ var _player_count: int = 2
 var _cycle_turns: bool = false
 var _animation_scenario: bool = false
 var _animation_scene: Control
+var _confirmation_scenario: bool = false
+var _confirmation_scene: Control
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -28,6 +30,7 @@ func _run() -> void:
 	_player_count = int(options.get("players", 2))
 	_cycle_turns = _is_enabled(options.get("cycle", false))
 	_animation_scenario = _is_enabled(options.get("animation", false))
+	_confirmation_scenario = _is_enabled(options.get("confirmation", false))
 	_submit_first_action = _is_enabled(options.get("submit", false))
 	_wait_for_disconnect = _is_enabled(options.get("wait_disconnect", false))
 	_test_invalid_action = _is_enabled(options.get("test_invalid", false))
@@ -71,6 +74,26 @@ func _on_snapshot_received(state: GameState, viewer_id: int) -> void:
 		push_error("Opponent hand identities were not hidden.")
 		_finished = true
 		quit(1)
+		return
+	if _confirmation_scenario and viewer_id == 0 and state.phase == GameState.Phase.DEPLOYMENT and _confirmation_scene == null:
+		GameSettings.confirm_actions = true
+		_confirmation_scene = load("res://scenes/main/game_scene.tscn").instantiate()
+		root.add_child(_confirmation_scene)
+		_confirmation_scene.call("_on_advance_pressed")
+		var dialog: ConfirmationDialog = _confirmation_scene.get("action_dialog")
+		if not dialog.visible or bool(online.get("action_pending")):
+			push_error("Online action was submitted before confirmation.")
+			_finished = true
+			quit(1)
+			return
+		dialog.get_ok_button().pressed.emit()
+		if not bool(online.get("action_pending")):
+			push_error("Confirmed online action was not submitted.")
+			_finished = true
+			quit(1)
+			return
+		_submitted = true
+		print("ONLINE_CONFIRMATION_SUBMITTED")
 		return
 	if _animation_scenario:
 		_animation_step(state, viewer_id)

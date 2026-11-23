@@ -97,6 +97,8 @@ func _schedule_layout_update() -> void:
 
 func _update_layout() -> void:
 	layout_update_pending = false
+	if not is_inside_tree():
+		return
 	var next_scale: float = _screen_ui_scale()
 	if not is_equal_approx(next_scale, ui_scale):
 		var scroll_position: int = roundi(scroll.scroll_vertical * next_scale / ui_scale)
@@ -229,6 +231,7 @@ func _army_picker(selected_army: String) -> OptionButton:
 
 func _build_home(host: Control) -> void:
 	var box := _new_view(host, "home", "Tactical Fantasy TCG", "Gather your forces and choose how to play.")
+	_button(box, "Tutorial", _start_tutorial)
 	_button(box, "Local Play", func() -> void: _show_view("local"))
 	_button(box, "Online Play", func() -> void: _show_view("online"))
 	_button(box, "Deck Builder", func() -> void: get_tree().change_scene_to_file(DECK_BUILDER))
@@ -237,6 +240,11 @@ func _build_home(host: Control) -> void:
 	motion.button_pressed = GameSettings.reduce_motion
 	motion.toggled.connect(func(enabled: bool) -> void: GameSettings.reduce_motion = enabled)
 	box.add_child(motion)
+	var confirmations := CheckBox.new()
+	confirmations.text = "Confirm actions"
+	confirmations.button_pressed = GameSettings.confirm_actions
+	confirmations.toggled.connect(func(enabled: bool) -> void: GameSettings.confirm_actions = enabled)
+	box.add_child(confirmations)
 	_button(box, "Quit", func() -> void: get_tree().quit())
 
 func _build_local(host: Control) -> void:
@@ -301,6 +309,7 @@ func _refresh_local_mode(_index: int = 0) -> void:
 		seat_labels[seat].text = "Player %d%s" % [seat + 1, " / Computer" if seat == 1 and mode == LocalMode.COMPUTER else ""]
 
 func _start_local() -> void:
+	GameSettings.tutorial_mode = false
 	var mode: int = local_mode_picker.get_selected_id()
 	GameSettings.ai_enabled = mode == LocalMode.COMPUTER
 	GameSettings.player_count = 4 if mode == LocalMode.FOUR_PLAYERS else 2
@@ -311,6 +320,10 @@ func _start_local() -> void:
 		GameSettings.armies[seat] = ArmyCatalog.ARMY_IDS[army_pickers[seat].selected]
 		var picker: OptionButton = deck_pickers[seat]
 		GameSettings.deck_names[seat] = "" if picker.selected <= 0 else picker.get_item_text(picker.selected)
+	get_tree().change_scene_to_file(GAME_SCENE)
+
+func _start_tutorial() -> void:
+	GameSettings.tutorial_mode = true
 	get_tree().change_scene_to_file(GAME_SCENE)
 
 func _build_online_choice(host: Control) -> void:

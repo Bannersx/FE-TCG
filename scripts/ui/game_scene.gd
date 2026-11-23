@@ -11,8 +11,24 @@ const OWNER_TEXT: Array[Color] = [Color(0.65, 0.85, 1.0), Color(1.0, 0.70, 0.65)
 
 var engine: GameEngine
 var ai: AIController
+var tutorial: TutorialController
+var tutorial_busy: bool = false
+var tutorial_error: String = ""
+var tutorial_title: Label
+var tutorial_instruction: Label
+var tutorial_finish_button: Button
+var tutorial_panel: Control
+var tutorial_mobile_button: Button
+var tutorial_overlay: Control
+var tutorial_overlay_title: Label
+var tutorial_overlay_instruction: Label
+var tutorial_overlay_continue: Button
+var tutorial_overlay_scale: float = 1.0
+var tutorial_display_key: String = ""
 var cells: Dictionary = {}
 var highlights: Dictionary = {}
+var range_previews: Dictionary = {}
+var target_reasons: Dictionary = {}
 var selected_card: CardData
 var pending_target_id: String = ""
 var hover_tile: Vector2i = Vector2i(-1, -1)
@@ -35,6 +51,7 @@ var inspector: CardInspector
 var log_label: RichTextLabel
 var advance_button: Button
 var wait_button: Button
+var finish_setup_button: Button
 var support_check: CheckBox
 var handoff_panel: Control
 var handoff_label: Label
@@ -45,6 +62,9 @@ var setup_box: HFlowContainer
 var setup_description: Label
 var effect_layer: Control
 var reduce_motion_check: CheckBox
+var confirm_actions_check: CheckBox
+var action_dialog: ConfirmationDialog
+var pending_action: Dictionary = {}
 var setup_buttons: Dictionary = {}
 var setup_terrain: String = BoardState.FOREST
 func _ready() -> void:
@@ -59,20 +79,23 @@ func _ready() -> void:
 			OnlineMatch.action_result_received.connect(_on_online_action_result)
 		if not OnlineMatch.match_ended.is_connected(_on_online_match_ended):
 			OnlineMatch.match_ended.connect(_on_online_match_ended)
+	elif GameSettings.tutorial_mode:
+		tutorial = TutorialController.new()
+		engine = tutorial.engine
 	else:
 		var decks: Array = []
 		for seat in range(GameSettings.player_count):
 			decks.append(DeckData.resolve(GameSettings.deck_names[seat], seat, DeckData.SAVE_DIR, GameSettings.armies[seat]))
 		engine = GameEngine.new(0, decks, false, GameSettings.armies, GameSettings.setup_tiles, GameSettings.player_count)
 	_build_ui()
-	if not online and GameSettings.ai_enabled:
+	if not online and tutorial == null and GameSettings.ai_enabled:
 		ai = AIController.new(GameSettings.ai_difficulty)
 		ai_timer = Timer.new()
 		ai_timer.wait_time = AI_STEP_SECONDS
 		ai_timer.timeout.connect(_ai_step)
 		add_child(ai_timer)
 		ai_timer.start()
-	elif not online:
+	elif not online and tutorial == null:
 		_show_handoff()
 	_refresh()
 
@@ -98,6 +121,10 @@ func _build_ui() -> void:
 	phase_label = Label.new()
 	phase_label.add_theme_font_size_override("font_size", 20)
 	left.add_child(phase_label)
+	var legend := Label.new()
+	legend.text = "Hover a unit: M = movement, A = attack from current position | OK / X = card target"
+	legend.add_theme_font_size_override("font_size", 12)
+	left.add_child(legend)
 	board_grid = GridContainer.new()
 	board_grid.columns = _state().board.width
 	board_grid.add_theme_constant_override("h_separation", 3)
@@ -110,6 +137,7 @@ func _build_ui() -> void:
 			cell.custom_minimum_size = Vector2(130, 65) if _state().players.size() == 4 else CELL_SIZE
 			cell.pressed.connect(_on_tile_pressed.bind(tile))
 			cell.mouse_entered.connect(_on_tile_hover.bind(tile))
+			cell.mouse_exited.connect(_on_tile_unhover.bind(tile))
 			board_grid.add_child(cell)
 			cells[tile] = cell
 	hand_title = Label.new()
@@ -129,6 +157,31 @@ func _build_ui() -> void:
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	right.add_theme_constant_override("separation", 8)
 	root.add_child(right)
+	if tutorial != null:
+		var lesson_panel := PanelContainer.new()
+		var lesson_style := StyleBoxFlat.new()
+		lesson_style.bg_color = Color(0.10, 0.19, 0.22)
+		lesson_style.border_color = Color(0.4, 0.85, 0.75)
+		lesson_style.set_border_width_all(2)
+		lesson_style.set_corner_radius_all(4)
+		lesson_style.set_content_margin_all(10)
+		lesson_panel.add_theme_stylebox_override("panel", lesson_style)
+		right.add_child(lesson_panel)
+		tutorial_panel = lesson_panel
+		var lesson_box := VBoxContainer.new()
+		lesson_panel.add_child(lesson_box)
+		tutorial_title = Label.new()
+		tutorial_title.add_theme_font_size_override("font_size", 19)
+		tutorial_title.add_theme_color_override("font_color", Color(0.6, 1.0, 0.9))
+		lesson_box.add_child(tutorial_title)
+		tutorial_instruction = Label.new()
+		tutorial_instruction.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		tutorial_instruction.add_theme_font_size_override("font_size", 16)
+		lesson_box.add_child(tutorial_instruction)
+		tutorial_finish_button = Button.new()
+		tutorial_finish_button.text = "Finish tutorial"
+		tutorial_finish_button.pressed.connect(_return_to_menu)
+		lesson_box.add_child(tutorial_finish_button)
 	summary_scroll = ScrollContainer.new()
 	summary_scroll.custom_minimum_size.y = 460
 	summary_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -150,16 +203,21 @@ func _build_ui() -> void:
 	message_label.custom_minimum_size = Vector2(0, 44)
 	right.add_child(message_label)
 	var buttons := HBoxContainer.new()
+	buttons.add_theme_constant_override("separation", 8)
 	right.add_child(buttons)
 	advance_button = Button.new()
-	advance_button.custom_minimum_size = Vector2(0, 46)
+	advance_button.custom_minimum_size = Vector2(0, 52)
 	advance_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	advance_button.tooltip_text = "Advance to the command phase or end your turn."
+	_style_phase_button(advance_button, true)
 	advance_button.pressed.connect(_on_advance_pressed)
 	buttons.add_child(advance_button)
 	wait_button = Button.new()
 	wait_button.text = "Wait (end activation)"
-	wait_button.custom_minimum_size = Vector2(0, 46)
+	wait_button.custom_minimum_size = Vector2(0, 52)
 	wait_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wait_button.tooltip_text = "End the active unit's activation."
+	_style_phase_button(wait_button, false)
 	wait_button.pressed.connect(_on_wait_pressed)
 	buttons.add_child(wait_button)
 	var menu_button := Button.new()
@@ -171,6 +229,11 @@ func _build_ui() -> void:
 	reduce_motion_check.button_pressed = GameSettings.reduce_motion
 	reduce_motion_check.toggled.connect(_set_reduce_motion)
 	right.add_child(reduce_motion_check)
+	confirm_actions_check = CheckBox.new()
+	confirm_actions_check.text = "Confirm actions"
+	confirm_actions_check.button_pressed = GameSettings.confirm_actions
+	confirm_actions_check.toggled.connect(func(enabled: bool) -> void: GameSettings.confirm_actions = enabled)
+	right.add_child(confirm_actions_check)
 	setup_box = HFlowContainer.new()
 	right.add_child(setup_box)
 	for terrain: String in BoardState.PLACEABLE:
@@ -180,12 +243,15 @@ func _build_ui() -> void:
 		terrain_button.pressed.connect(_on_terrain_picked.bind(terrain))
 		setup_box.add_child(terrain_button)
 		setup_buttons[terrain] = terrain_button
-	var finish_button := Button.new()
-	finish_button.text = "Finish setup"
-	finish_button.pressed.connect(func() -> void:
+	finish_setup_button = Button.new()
+	finish_setup_button.text = "Finish setup"
+	finish_setup_button.custom_minimum_size.y = 46
+	finish_setup_button.tooltip_text = "Finish your remaining terrain placements."
+	_style_phase_button(finish_setup_button, true)
+	finish_setup_button.pressed.connect(func() -> void:
 		if not _input_locked():
-			_submit({"type": "pass_setup"}))
-	setup_box.add_child(finish_button)
+			_request_action({"type": "pass_setup"}))
+	setup_box.add_child(finish_setup_button)
 	setup_description = Label.new()
 	setup_description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	right.add_child(setup_description)
@@ -213,9 +279,55 @@ func _build_ui() -> void:
 	status_button.pressed.connect(_show_player_status)
 	add_child(status_button)
 	status_button.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	if tutorial != null:
+		tutorial_mobile_button = Button.new()
+		tutorial_mobile_button.pressed.connect(_show_tutorial_overlay)
+		add_child(tutorial_mobile_button)
+		tutorial_mobile_button.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	action_dialog = ConfirmationDialog.new()
+	action_dialog.title = "Confirm action"
+	action_dialog.ok_button_text = "Confirm"
+	action_dialog.cancel_button_text = "Cancel"
+	action_dialog.get_label().autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	action_dialog.confirmed.connect(_confirm_action)
+	action_dialog.canceled.connect(_cancel_action)
+	action_dialog.close_requested.connect(_cancel_action)
+	add_child(action_dialog)
 	resized.connect(_update_status_button)
 	get_window().size_changed.connect(_update_status_button)
 	_update_status_button()
+
+func _style_phase_button(button: Button, primary: bool) -> void:
+	var border := Color(0.82, 0.67, 0.38)
+	var normal := Color(0.12, 0.28, 0.34) if primary else Color(0.25, 0.20, 0.14)
+	var hover := Color(0.19, 0.39, 0.45) if primary else Color(0.35, 0.28, 0.18)
+	var pressed := Color(0.08, 0.20, 0.25) if primary else Color(0.18, 0.14, 0.10)
+	button.add_theme_stylebox_override("normal", _phase_button_style(normal, border))
+	button.add_theme_stylebox_override("hover", _phase_button_style(hover, border.lightened(0.25)))
+	button.add_theme_stylebox_override("pressed", _phase_button_style(pressed, border))
+	button.add_theme_stylebox_override("disabled", _phase_button_style(Color(0.16, 0.17, 0.18), Color(0.38, 0.38, 0.35)))
+	var focus := StyleBoxFlat.new()
+	focus.draw_center = false
+	focus.border_color = Color(1.0, 0.91, 0.63)
+	focus.set_border_width_all(2)
+	focus.set_corner_radius_all(5)
+	button.add_theme_stylebox_override("focus", focus)
+	button.add_theme_font_size_override("font_size", 17)
+	for color_name in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color", "font_focus_color"]:
+		button.add_theme_color_override(color_name, Color(0.98, 0.96, 0.88))
+	button.add_theme_color_override("font_disabled_color", Color(0.68, 0.68, 0.64))
+
+func _phase_button_style(background: Color, border: Color) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = background
+	style.border_color = border
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(5)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 6
+	style.content_margin_bottom = 6
+	return style
 
 func _status_ui_scale() -> float:
 	var pixel_scale: float = absf(get_viewport().get_screen_transform().get_scale().x)
@@ -237,6 +349,84 @@ func _update_status_button() -> void:
 	status_button.offset_right = -8 * scale_factor
 	status_button.offset_top = 8 * scale_factor
 	status_button.offset_bottom = 52 * scale_factor
+	if tutorial != null:
+		var mobile: bool = scale_factor > 1.5
+		if mobile and not tutorial_mobile_button.visible:
+			tutorial_display_key = ""
+		tutorial_panel.visible = not mobile
+		tutorial_mobile_button.visible = mobile
+		tutorial_mobile_button.add_theme_font_size_override("font_size", roundi(15 * scale_factor))
+		tutorial_mobile_button.offset_left = -155 * scale_factor
+		tutorial_mobile_button.offset_right = -8 * scale_factor
+		tutorial_mobile_button.offset_top = -52 * scale_factor
+		tutorial_mobile_button.offset_bottom = -8 * scale_factor
+		if is_instance_valid(tutorial_overlay) and (not mobile or not is_equal_approx(scale_factor, tutorial_overlay_scale)):
+			_close_tutorial_overlay()
+			tutorial_display_key = ""
+		if is_instance_valid(tutorial_title):
+			_refresh_tutorial()
+
+func _show_tutorial_overlay() -> void:
+	if is_instance_valid(tutorial_overlay):
+		return
+	var scale_factor: float = _status_ui_scale()
+	tutorial_overlay_scale = scale_factor
+	var overlay := ColorRect.new()
+	overlay.color = Color(0.05, 0.07, 0.09, 0.97)
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(overlay)
+	tutorial_overlay = overlay
+	var margin := MarginContainer.new()
+	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
+	for side in ["left", "right", "top", "bottom"]:
+		margin.add_theme_constant_override("margin_" + side, roundi(16 * scale_factor))
+	overlay.add_child(margin)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", roundi(12 * scale_factor))
+	margin.add_child(box)
+	tutorial_overlay_title = Label.new()
+	tutorial_overlay_title.add_theme_font_size_override("font_size", roundi(22 * scale_factor))
+	tutorial_overlay_title.add_theme_color_override("font_color", Color(0.6, 1.0, 0.9))
+	box.add_child(tutorial_overlay_title)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	box.add_child(scroll)
+	tutorial_overlay_instruction = Label.new()
+	tutorial_overlay_instruction.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tutorial_overlay_instruction.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	tutorial_overlay_instruction.add_theme_font_size_override("font_size", roundi(18 * scale_factor))
+	scroll.add_child(tutorial_overlay_instruction)
+	tutorial_overlay_continue = Button.new()
+	tutorial_overlay_continue.custom_minimum_size.y = 52 * scale_factor
+	tutorial_overlay_continue.add_theme_font_size_override("font_size", roundi(18 * scale_factor))
+	tutorial_overlay_continue.pressed.connect(func() -> void:
+		if tutorial.finished or not tutorial_error.is_empty():
+			_return_to_menu()
+		else:
+			_close_tutorial_overlay())
+	box.add_child(tutorial_overlay_continue)
+	var exit := Button.new()
+	exit.text = "Exit tutorial"
+	exit.custom_minimum_size.y = 52 * scale_factor
+	exit.add_theme_font_size_override("font_size", roundi(18 * scale_factor))
+	exit.pressed.connect(_return_to_menu)
+	box.add_child(exit)
+	_update_tutorial_overlay()
+
+func _close_tutorial_overlay() -> void:
+	if is_instance_valid(tutorial_overlay):
+		tutorial_overlay.queue_free()
+	tutorial_overlay = null
+
+func _update_tutorial_overlay() -> void:
+	if not is_instance_valid(tutorial_overlay):
+		return
+	tutorial_overlay_title.text = tutorial_title.text
+	tutorial_overlay_instruction.text = tutorial_instruction.text
+	tutorial_overlay_continue.text = "Back to menu" if not tutorial_error.is_empty() else ("Finish tutorial" if tutorial.finished else "Continue")
+
 
 func _show_player_status() -> void:
 	if is_instance_valid(status_overlay):
@@ -323,6 +513,7 @@ func _build_overlay(kind: String, button_text: String) -> Control:
 	return panel
 
 func _return_to_menu() -> void:
+	GameSettings.tutorial_mode = false
 	if OnlineMatch.mode != "offline" and OnlineMatch.mode != "server":
 		OnlineMatch.disconnect_from_server()
 	get_tree().change_scene_to_file(MAIN_MENU)
@@ -336,9 +527,15 @@ func _is_ai_turn() -> bool:
 	return ai != null and _state().active_player_id == GameSettings.ai_player_id
 
 func _viewer_id() -> int:
+	if tutorial != null:
+		return 0
 	return OnlineMatch.local_player_id if OnlineMatch.mode == "client" else (0 if ai != null else _state().active_player_id)
 
 func _input_locked() -> bool:
+	if not pending_action.is_empty():
+		return true
+	if tutorial != null and (tutorial_busy or tutorial.finished or not tutorial_error.is_empty()):
+		return true
 	if OnlineMatch.mode == "disconnected":
 		return true
 	if OnlineMatch.mode == "client":
@@ -356,16 +553,34 @@ func _active_unit() -> UnitState:
 
 func _on_tile_hover(tile: Vector2i) -> void:
 	hover_tile = tile
+	_compute_range_previews()
+	_refresh_cells()
+	_refresh_info()
+
+func _on_tile_unhover(tile: Vector2i) -> void:
+	if hover_tile != tile:
+		return
+	hover_tile = Vector2i(-1, -1)
+	_compute_range_previews()
+	_refresh_cells()
 	_refresh_info()
 
 func _on_tile_pressed(tile: Vector2i) -> void:
 	if _input_locked():
 		return
+	if tutorial != null:
+		if tile != tutorial.expected_tile():
+			_show_tutorial_hint()
+			return
+		var expected_card: String = str(tutorial.expected_action().get("card_id", ""))
+		if not expected_card.is_empty() and (selected_card == null or selected_card.card_id != expected_card):
+			_show_tutorial_hint()
+			return
 	var state := _state()
 	var pid: int = state.active_player_id
 	var unit: UnitState = state.board.unit_at(tile)
 	if state.phase == GameState.Phase.SETUP:
-		_submit({"type": "place_terrain", "tile": tile, "terrain": setup_terrain})
+		_request_action({"type": "place_terrain", "tile": tile, "terrain": setup_terrain})
 		return
 	if selected_card != null:
 		_play_selected_card(pid, tile, unit)
@@ -375,24 +590,24 @@ func _on_tile_pressed(tile: Vector2i) -> void:
 	var active: UnitState = _active_unit()
 	if active == null:
 		if unit != null and unit.owner_id == pid:
-			_submit({"type": "start_activation", "unit_id": unit.instance_id})
+			_request_action({"type": "start_activation", "unit_id": unit.instance_id})
 		return
 	if unit != null and unit.owner_id != pid:
-		_submit({"type": "attack", "target_id": unit.instance_id, "support": support_check.button_pressed})
+		_request_action({"type": "attack", "target_id": unit.instance_id, "support": support_check.button_pressed})
 	elif unit == null:
-		_submit({"type": "move", "destination": tile})
+		_request_action({"type": "move", "destination": tile})
 
 func _play_selected_card(pid: int, tile: Vector2i, unit: UnitState) -> void:
 	var card: CardData = selected_card
 	match card.card_type:
 		CardData.CardType.UNIT:
-			_submit({"type": "deploy", "card_id": card.card_id, "tile": tile})
+			_request_action({"type": "deploy", "card_id": card.card_id, "tile": tile})
 		CardData.CardType.EQUIPMENT:
 			if unit != null:
-				_submit({"type": "equip", "card_id": card.card_id, "unit_id": unit.instance_id})
+				_request_action({"type": "equip", "card_id": card.card_id, "unit_id": unit.instance_id})
 		CardData.CardType.PROMOTION:
 			if unit != null:
-				_submit({"type": "promote", "card_id": card.card_id, "unit_id": unit.instance_id})
+				_request_action({"type": "promote", "card_id": card.card_id, "unit_id": unit.instance_id})
 		CardData.CardType.TACTIC:
 			if card.target_kind == "friendly_unit_tile":
 				if pending_target_id == "":
@@ -401,12 +616,15 @@ func _play_selected_card(pid: int, tile: Vector2i, unit: UnitState) -> void:
 						message_label.text = "Now choose the destination tile."
 						_refresh()
 				else:
-					_submit({"type": "play_tactic", "card_id": card.card_id, "target_id": pending_target_id, "destination": tile})
+					_request_action({"type": "play_tactic", "card_id": card.card_id, "target_id": pending_target_id, "destination": tile})
 			elif unit != null:
-				_submit({"type": "play_tactic", "card_id": card.card_id, "target_id": unit.instance_id})
+				_request_action({"type": "play_tactic", "card_id": card.card_id, "target_id": unit.instance_id})
 
 func _on_card_pressed(card: CardData) -> void:
 	if _input_locked() or _state().phase == GameState.Phase.SETUP:
+		return
+	if tutorial != null and card.card_id != str(tutorial.expected_action().get("card_id", "")):
+		_show_tutorial_hint()
 		return
 	pending_target_id = ""
 	selected_card = null if selected_card == card else card
@@ -420,7 +638,7 @@ func _card_hint(card: CardData) -> String:
 		CardData.CardType.UNIT:
 			return "Click a highlighted tile in your deployment zone."
 		CardData.CardType.EQUIPMENT, CardData.CardType.PROMOTION:
-			return "Click one of your units to use %s." % card.card_name
+			return "OK: eligible for %s. X: unavailable; hover for the reason." % card.card_name
 		CardData.CardType.TACTIC:
 			return "Click a target unit for %s." % card.card_name
 	return ""
@@ -431,11 +649,11 @@ func _on_terrain_picked(terrain: String) -> void:
 
 func _on_advance_pressed() -> void:
 	if not _input_locked():
-		_submit({"type": "advance_phase"})
+		_request_action({"type": "advance_phase"})
 
 func _on_wait_pressed() -> void:
 	if not _input_locked():
-		_submit({"type": "wait"})
+		_request_action({"type": "wait"})
 
 func _on_handoff_ready() -> void:
 	handoff_panel.visible = false
@@ -465,7 +683,78 @@ func _set_reduce_motion(enabled: bool) -> void:
 
 # ---- Action submission ----
 
+func _request_action(action: Dictionary) -> void:
+	if _input_locked():
+		return
+	if tutorial != null and not tutorial.accepts(action):
+		_show_tutorial_hint()
+		return
+	if not GameSettings.confirm_actions:
+		_submit(action)
+		return
+	pending_action = action.duplicate(true)
+	action_dialog.dialog_text = _describe_action(action)
+	var ui_scale: float = _status_ui_scale()
+	action_dialog.get_label().add_theme_font_size_override("font_size", roundi(16 * ui_scale))
+	for button: Button in [action_dialog.get_ok_button(), action_dialog.get_cancel_button()]:
+		button.custom_minimum_size = Vector2(100, 44) * ui_scale
+		button.add_theme_font_size_override("font_size", roundi(16 * ui_scale))
+	action_dialog.popup_centered(Vector2i(roundi(minf(520 * ui_scale, get_viewport_rect().size.x * 0.9)), 0))
+
+func _describe_action(action: Dictionary) -> String:
+	var card_name: String = selected_card.card_name if selected_card != null else str(action.get("card_id", ""))
+	match str(action["type"]):
+		"place_terrain":
+			return "Place %s at %s?" % [str(action["terrain"]).capitalize(), _tile_description(action["tile"])]
+		"pass_setup":
+			return "Finish terrain setup?"
+		"start_activation":
+			return "Activate %s?" % _unit_description(str(action["unit_id"]))
+		"move":
+			return "Move %s to %s?" % [_unit_description(_state().current_activation_unit_id), _tile_description(action["destination"])]
+		"attack":
+			var support: String = " with support selected" if bool(action.get("support", false)) else ""
+			return "Attack %s with %s%s?" % [_unit_description(str(action["target_id"])), _unit_description(_state().current_activation_unit_id), support]
+		"deploy":
+			return "Deploy %s at %s?" % [card_name, _tile_description(action["tile"])]
+		"equip":
+			return "Equip %s to %s?" % [card_name, _unit_description(str(action["unit_id"]))]
+		"promote":
+			return "Promote %s with %s?" % [_unit_description(str(action["unit_id"])), card_name]
+		"play_tactic":
+			var destination: String = " to %s" % _tile_description(action["destination"]) if action.has("destination") else ""
+			return "Play %s on %s%s?" % [card_name, _unit_description(str(action["target_id"])), destination]
+		"advance_phase":
+			return "Go to the command phase?" if _state().phase == GameState.Phase.DEPLOYMENT else "End your turn?"
+		"wait":
+			return "End %s's activation?" % _unit_description(_state().current_activation_unit_id)
+	return "Confirm this action?"
+
+func _tile_description(tile: Vector2i) -> String:
+	return "column %d, row %d" % [tile.x + 1, tile.y + 1]
+
+func _unit_description(unit_id: String) -> String:
+	var unit: UnitState = _state().find_unit(unit_id)
+	return "%s (%s)" % [unit.display_name(), _tile_description(unit.position)] if unit != null else unit_id
+
+func _confirm_action() -> void:
+	if pending_action.is_empty():
+		return
+	var action: Dictionary = pending_action
+	pending_action = {}
+	if _input_locked():
+		message_label.text = "The action is no longer available."
+		_refresh()
+		return
+	_submit(action)
+
+func _cancel_action() -> void:
+	pending_action.clear()
+
 func _submit(action: Dictionary) -> bool:
+	if tutorial != null and not tutorial_busy and not tutorial.accepts(action):
+		_show_tutorial_hint()
+		return false
 	if OnlineMatch.mode == "client":
 		if not OnlineMatch.submit_action(action):
 			message_label.text = "Could not submit that action."
@@ -488,16 +777,48 @@ func _submit(action: Dictionary) -> bool:
 	selected_card = null
 	pending_target_id = ""
 	message_label.text = ""
+	if tutorial != null and not tutorial_busy:
+		tutorial.step_index += 1
+		if tutorial.step_index == tutorial.steps.size():
+			tutorial_busy = true
+			call_deferred("_run_tutorial_opponent")
 	var switched: bool = _state().turn_number != previous_turn or (was_setup and _state().active_player_id != previous_player)
-	if switched and _state().phase != GameState.Phase.GAME_OVER and ai == null:
+	if switched and _state().phase != GameState.Phase.GAME_OVER and ai == null and tutorial == null:
 		_show_handoff()
 	_refresh()
 	_animate(action, result, positions, visual_units, previous_turn, previous_player)
 	return true
 
+func _show_tutorial_hint() -> void:
+	message_label.text = "Follow the current tutorial step: " + tutorial.instruction()
+
+func _run_tutorial_opponent() -> void:
+	if not is_inside_tree():
+		return
+	await get_tree().create_timer(0.65).timeout
+	if not is_inside_tree():
+		return
+	if _state().active_player_id != 1 or not _submit({"type": "advance_phase"}) or not _submit({"type": "advance_phase"}):
+		_tutorial_failed("The scripted opponent could not complete its turn.")
+		return
+	if _state().active_player_id != 0 or _state().players[0].victory_points != 1:
+		_tutorial_failed("The objective did not score as expected.")
+		return
+	tutorial.finished = true
+	tutorial_busy = false
+	_refresh()
+
+func _tutorial_failed(message: String) -> void:
+	tutorial_error = message + " Return to the menu and restart the tutorial."
+	push_error(tutorial_error)
+	_refresh()
+
 func _on_online_snapshot(state: GameState, viewer_id: int) -> void:
 	if OnlineMatch.mode != "client" or viewer_id != OnlineMatch.local_player_id:
 		return
+	if not pending_action.is_empty():
+		_cancel_action()
+		action_dialog.hide()
 	var previous_turn: int = _state().turn_number
 	var previous_player: int = _state().active_player_id
 	var positions: Dictionary = _snapshot_positions()
@@ -517,6 +838,8 @@ func _on_online_action_result(accepted: bool, message: String) -> void:
 	_refresh()
 
 func _on_online_match_ended(message: String) -> void:
+	_cancel_action()
+	action_dialog.hide()
 	message_label.text = message
 	_refresh()
 
@@ -709,7 +1032,7 @@ func _animate_unit_move(origin: Vector2i, destination: Vector2i, unit: Dictionar
 	tween.tween_callback(func() -> void:
 		var occupant: UnitState = _state().board.unit_at(destination)
 		if occupant != null and occupant.instance_id == str(unit["id"]):
-			destination_cell.show_state(_state().board.terrain_at(destination), occupant, str(highlights.get(destination, "")), _state().seeds.has(destination)))
+			_refresh_cell(destination))
 	tween.tween_property(label, "modulate:a", 0.0, 0.15)
 	tween.tween_callback(label.queue_free)
 
@@ -782,20 +1105,36 @@ func _ai_step() -> void:
 
 func _refresh() -> void:
 	_compute_highlights()
+	_compute_range_previews()
 	_refresh_cells()
 	_refresh_hand()
 	_refresh_summaries()
 	_refresh_controls()
 	_refresh_info()
 	_refresh_log()
+	if tutorial != null:
+		_refresh_tutorial()
 	if _state().phase == GameState.Phase.GAME_OVER:
 		_close_player_status()
 		handoff_panel.visible = false
 		gameover_label.text = "%s wins!\n(%s)" % [_state().players[_state().winner_id].display_name, _state().game_over_reason]
 		gameover_panel.visible = true
 
+func _refresh_tutorial() -> void:
+	tutorial_title.text = "Tutorial complete" if tutorial.finished else "Tutorial - step %d of %d" % [mini(tutorial.step_index + 1, tutorial.steps.size()), tutorial.steps.size()]
+	tutorial_instruction.text = tutorial_error if not tutorial_error.is_empty() else tutorial.instruction()
+	tutorial_finish_button.text = "Back to menu" if not tutorial_error.is_empty() else "Finish tutorial"
+	tutorial_finish_button.visible = tutorial.finished or not tutorial_error.is_empty()
+	tutorial_mobile_button.text = "Tutorial %d/%d" % [mini(tutorial.step_index + 1, tutorial.steps.size()), tutorial.steps.size()]
+	var display_key: String = "%d:%s:%s" % [tutorial.step_index, tutorial.finished, tutorial_error]
+	if tutorial_mobile_button.visible and tutorial_display_key != display_key:
+		tutorial_display_key = display_key
+		_show_tutorial_overlay()
+	_update_tutorial_overlay()
+
 func _compute_highlights() -> void:
 	highlights.clear()
+	target_reasons.clear()
 	if _input_locked():
 		return
 	var state := _state()
@@ -838,15 +1177,18 @@ func _highlight_for_card(state: GameState, pid: int) -> void:
 					if GameEngine.deploy_error(state, pid, card, tile) == "":
 						highlights[tile] = "deploy"
 		CardData.CardType.EQUIPMENT:
-			for unit in state.players[pid].units:
-				if GameEngine.equip_error(state, pid, card, unit) == "":
-					highlights[unit.position] = "target"
+			_highlight_equipment_targets(state, pid, card)
 		CardData.CardType.PROMOTION:
-			for unit in state.players[pid].units:
-				if GameEngine.promote_error(state, pid, card, unit) == "":
-					highlights[unit.position] = "target"
+			_highlight_equipment_targets(state, pid, card)
 		CardData.CardType.TACTIC:
 			_highlight_tactic(state, pid, card)
+
+func _highlight_equipment_targets(state: GameState, pid: int, card: CardData) -> void:
+	for player: PlayerState in state.players:
+		for unit: UnitState in player.units:
+			var error: String = GameEngine.equip_error(state, pid, card, unit) if card.card_type == CardData.CardType.EQUIPMENT else GameEngine.promote_error(state, pid, card, unit)
+			highlights[unit.position] = "eligible" if error.is_empty() else "ineligible"
+			target_reasons[unit.position] = error
 
 func _highlight_tactic(state: GameState, pid: int, card: CardData) -> void:
 	if pending_target_id != "":
@@ -867,11 +1209,35 @@ func _highlight_tactic(state: GameState, pid: int, card: CardData) -> void:
 			elif GameEngine.tactic_error(state, pid, card, unit.instance_id, probe) == "":
 				highlights[unit.position] = "target"
 
-func _refresh_cells() -> void:
+func _compute_range_previews() -> void:
+	range_previews.clear()
 	var state := _state()
+	if selected_card != null or handoff_panel.visible or not state.board.is_valid_position(hover_tile):
+		return
+	var unit: UnitState = state.board.unit_at(hover_tile)
+	if unit == null:
+		return
+	for tile: Vector2i in MovementResolver.reachable_tiles(state.board, unit):
+		if tile != unit.position:
+			range_previews[tile] = {"move": true}
+	for y in range(state.board.height):
+		for x in range(state.board.width):
+			var tile := Vector2i(x, y)
+			var distance: int = BoardState.distance(unit.position, tile)
+			if distance >= 1 and distance <= unit.attack_range():
+				if not range_previews.has(tile):
+					range_previews[tile] = {}
+				range_previews[tile]["attack"] = true
+
+func _refresh_cells() -> void:
 	for tile: Vector2i in cells:
-		var cell: BattleCell = cells[tile]
-		cell.show_state(state.board.terrain_at(tile), state.board.unit_at(tile), str(highlights.get(tile, "")), state.seeds.has(tile))
+		_refresh_cell(tile)
+
+func _refresh_cell(tile: Vector2i) -> void:
+	var state := _state()
+	var cell: BattleCell = cells[tile]
+	var tutorial_target: bool = tutorial != null and not tutorial_busy and not tutorial.finished and tile == tutorial.expected_tile()
+	cell.show_state(state.board.terrain_at(tile), state.board.unit_at(tile), str(highlights.get(tile, "")), state.seeds.has(tile), range_previews.get(tile, {}), str(target_reasons.get(tile, "")), tutorial_target)
 
 func _refresh_hand() -> void:
 	for child in hand_box.get_children():
@@ -918,6 +1284,7 @@ func _refresh_controls() -> void:
 	for terrain: String in setup_buttons:
 		(setup_buttons[terrain] as Button).button_pressed = terrain == setup_terrain
 		(setup_buttons[terrain] as Button).disabled = locked
+	finish_setup_button.disabled = locked
 	match state.phase:
 		GameState.Phase.SETUP:
 			advance_button.text = "Terrain setup"
@@ -929,7 +1296,7 @@ func _refresh_controls() -> void:
 			advance_button.text = "Game over"
 	advance_button.disabled = locked or in_setup
 	wait_button.disabled = locked or _active_unit() == null
-	support_check.disabled = locked
+	support_check.disabled = locked or tutorial != null
 	var phase_names: Dictionary = {
 		GameState.Phase.SETUP: "Terrain setup: place terrain (%d left), then Finish setup" % state.setup_left[state.active_player_id],
 		GameState.Phase.DEPLOYMENT: "Deployment: deploy a unit, equip, promote, play tactics",

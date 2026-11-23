@@ -22,6 +22,14 @@ func _run() -> void:
 	_check(motion != null and GameSettings.reduce_motion, "main menu can enable reduced motion")
 	if motion != null:
 		motion.button_pressed = false
+	var confirmations: CheckBox
+	for child in views["home"].get_children():
+		if child is CheckBox and child.text == "Confirm actions":
+			confirmations = child
+	_check(confirmations != null and confirmations.button_pressed and GameSettings.confirm_actions, "action confirmations are enabled by default")
+	if confirmations != null:
+		confirmations.button_pressed = false
+	_check(not GameSettings.confirm_actions, "main menu can disable action confirmations")
 	_press(views["home"], "Local Play")
 	var seats: Array = menu.get("seat_panels")
 	var mode: OptionButton = menu.get("local_mode_picker")
@@ -99,8 +107,11 @@ func _run() -> void:
 	var summaries: Array = game.get("summary_panels") if game != null else []
 	_check(summaries.size() == 2 and (summaries[0].get_parent() as GridContainer).columns == 1, "two-player game uses full-width player panels")
 	if computer != null:
+		GameSettings.confirm_actions = true
 		game.call("_on_advance_pressed")
+		(game.get("action_dialog") as ConfirmationDialog).get_ok_button().pressed.emit()
 		game.call("_on_advance_pressed")
+		(game.get("action_dialog") as ConfirmationDialog).get_ok_button().pressed.emit()
 		game_engine = game.get("engine")
 		var computer_acted: bool = false
 		for _attempt in range(50):
@@ -110,7 +121,8 @@ func _run() -> void:
 			if computer_acted:
 				break
 			await create_timer(0.1).timeout
-		_check(computer_acted, "computer submits an action on its turn")
+		_check(computer_acted and not (game.get("action_dialog") as ConfirmationDialog).visible, "computer acts without confirmation")
+		GameSettings.confirm_actions = false
 	if game != null:
 		game.queue_free()
 	await process_frame
