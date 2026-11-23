@@ -20,15 +20,16 @@ Online matches use an authoritative, headless Godot server over ENet/UDP. Start 
 godot --headless --path . -- --server-port=7777
 ```
 
-Allow inbound UDP traffic on the chosen port (default `7777`). Choose **Online Play**, then **Create Room** or **Join Room**, and enter the server address and port. Choose the same room size on each client: two players or four-player free-for-all. The first player creates a room with a code; the others join with that code. The match starts when all seats are filled. Players choose their own army and deck. The room creator's terrain-setup choice is used for the match. **Back** cancels a connection or leaves a waiting room. If any player disconnects, the room ends; reconnecting and replacing players are not yet supported.
-
+Allow inbound UDP traffic on the chosen port (default `7777`). Choose **Online Play**, then **Create Room** or **Join Room**, and enter the server address and port. Choose the same room size on each client: two players or four-player free-for-all. The first player creates a room with a code; the others join with that code. The match starts when all seats are filled. Players choose their own army and deck. The room creator's terrain-setup choice is used for the match. **Back** cancels a connection or leaves a waiting room. Disconnects during a match are handled as described below.
 The server and all clients must use compatible builds, including for two-player rooms.
+
+If a player's connection drops during a match, the client reconnects automatically (up to 6 attempts) and resumes its seat with the snapshot of the current state. The server holds the seat for the reconnect grace period (120 seconds by default; change it with `--reconnect-grace=<seconds>` on the server). If the player does not return, the seat opens and anyone can take it: choose **Join Room** with the same room code, and the newcomer keeps the seat's army, deck and name. Rooms are removed once every seat is empty, and the server accepts at most 32 rooms at once. Waiting rooms do not survive a disconnect: the seat is released.
 
 For a first remote test, the server can run on your own PC. The easiest safer option for friends is a private mesh VPN (for example, Tailscale): install it on the server and player PCs, connect them to the same private network, and have clients use the server PC's VPN address. This avoids router port forwarding.
 
 Direct internet access is also possible: reserve a LAN address for the server PC, allow inbound **UDP** on the chosen port in its firewall, and forward that UDP port on your router to the PC. Players then use your public IP or a DNS name. If port forwarding does not work, your ISP may use carrier-grade NAT; use a VPN or a VPS instead. A changing public IP may also require dynamic DNS.
 
-This prototype has no public matchmaking, accounts, reconnect support, or hosting automation. The game server validates each submitted action and sends each player a filtered state that omits the opponent's hand and deck identities. Keep testing to trusted friends over a private VPN for now; this is not yet hardened as a public service.
+This prototype has no public matchmaking, accounts, or hosting automation. The game server validates each submitted action and sends each player a filtered state that omits the opponent's hand and deck identities. Keep testing to trusted friends over a private VPN for now; this is not yet hardened as a public service.
 
 For a local two-client smoke test, start the server, then run these in two other terminals:
 

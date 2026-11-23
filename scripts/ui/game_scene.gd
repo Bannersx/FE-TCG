@@ -2,12 +2,10 @@ extends Control
 
 const CARD_SCENE: PackedScene = preload("res://scenes/cards/card_visual.tscn")
 const PLAYER_SUMMARY = preload("res://scripts/ui/player_summary.gd")
+const MatchEffects = preload("res://scripts/ui/match_effects.gd")
 const MAIN_MENU: String = "res://scenes/main/main_menu.tscn"
-const CELL_SIZE: Vector2 = Vector2(150, 80)
 const AI_STEP_SECONDS: float = 0.55
-const STEP_DELAY: float = 0.35
-
-const OWNER_TEXT: Array[Color] = [Color(0.65, 0.85, 1.0), Color(1.0, 0.70, 0.65), Color(0.65, 1.0, 0.65), Color(0.90, 0.75, 1.0)]
+const CELL_SIZE: Vector2 = Vector2(150, 80)
 
 var engine: GameEngine
 var ai: AIController
@@ -60,7 +58,7 @@ var gameover_label: Label
 var ai_timer: Timer
 var setup_box: HFlowContainer
 var setup_description: Label
-var effect_layer: Control
+var effect_layer: MatchEffects
 var reduce_motion_check: CheckBox
 var confirm_actions_check: CheckBox
 var action_dialog: ConfirmationDialog
@@ -79,6 +77,8 @@ func _ready() -> void:
 			OnlineMatch.action_result_received.connect(_on_online_action_result)
 		if not OnlineMatch.match_ended.is_connected(_on_online_match_ended):
 			OnlineMatch.match_ended.connect(_on_online_match_ended)
+		if not OnlineMatch.status_changed.is_connected(_on_online_status):
+			OnlineMatch.status_changed.connect(_on_online_status)
 	elif GameSettings.tutorial_mode:
 		tutorial = TutorialController.new()
 		engine = tutorial.engine
@@ -267,12 +267,13 @@ func _build_ui() -> void:
 	log_label.add_theme_font_size_override("normal_font_size", 13)
 	right.add_child(log_label)
 
-	effect_layer = Control.new()
+	effect_layer = MatchEffects.new()
 	effect_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
 	effect_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(effect_layer)
 	handoff_panel = _build_overlay("handoff", "Ready")
 	gameover_panel = _build_overlay("gameover", "Back to menu")
+	effect_layer.configure(cells, _state, _refresh_cell, phase_label, summary_panels, handoff_panel)
 	move_child(effect_layer, handoff_panel.get_index())
 	status_button = Button.new()
 	status_button.text = "Players"
@@ -843,6 +844,10 @@ func _on_online_match_ended(message: String) -> void:
 	message_label.text = message
 	_refresh()
 
+func _on_online_status(message: String) -> void:
+	if OnlineMatch.mode in ["client", "reconnecting"]:
+		message_label.text = message
+
 # Positions before an action, so effects can still be shown on tiles of units that were just defeated.
 func _snapshot_positions() -> Dictionary:
 	var positions: Dictionary = {}
@@ -861,235 +866,16 @@ func _snapshot_visual_units() -> Dictionary:
 			}
 	return units
 
-func _cell_at(tile: Vector2i) -> BattleCell:
-	return cells.get(tile) as BattleCell
-
-# Purely cosmetic. State has already changed; nothing here can alter an outcome.
 func _animate(action: Dictionary, result: Dictionary, positions: Dictionary, units: Dictionary, previous_turn: int, previous_player: int) -> void:
-	var target_tile := Vector2i(-1, -1)
-	match str(action["type"]):
-		"deploy":
-			var cell: BattleCell = _cell_at(action["tile"])
-			cell.pulse()
-			cell.floating_text("Deployed", Color(0.5, 1.0, 0.6))
-			target_tile = action["tile"]
-		"move":
-			var moving_id: String = ""
-			for unit_id: String in positions:
-				var moved: UnitState = _state().find_unit(unit_id)
-				if moved != null and moved.position == action["destination"] and positions[unit_id] != moved.position:
-					moving_id = unit_id
-					break
-			if not moving_id.is_empty():
-				_animate_unit_move(positions[moving_id], action["destination"], units[moving_id])
-			_cell_at(action["destination"]).pulse()
-		"equip":
-			var card: CardData = CardCatalog.get_card(str(action["card_id"]))
-			var cell: BattleCell = _cell_at(positions[str(action["unit_id"])])
-			cell.flash(Color(1.0, 0.9, 0.5))
-			cell.floating_text("+" + card.card_name, Color(1.0, 0.9, 0.5))
-			target_tile = positions[str(action["unit_id"])]
-		"promote":
-			var cell: BattleCell = _cell_at(positions[str(action["unit_id"])])
-			cell.flash(Color(1.0, 0.85, 0.3))
-			cell.floating_text("Promoted!", Color(1.0, 0.85, 0.3))
-			target_tile = positions[str(action["unit_id"])]
-		"play_tactic":
-			_animate_tactic(action, positions, units)
-			target_tile = positions[str(action["target_id"])]
-		"attack":
-			_animate_attack(result, positions, units)
-		"place_terrain":
-			var terrain_cell: BattleCell = _cell_at(action["tile"])
-			terrain_cell.pulse()
-			terrain_cell.floating_text(str(action["terrain"]), Color(0.9, 0.9, 0.6))
-	if action.has("card_id") and target_tile != Vector2i(-1, -1):
-		var played_card: CardData = CardCatalog.get_card(str(action["card_id"]))
-		if played_card != null:
-			_animate_card_play(played_card.card_name, previous_player, target_tile)
-	var delay: float = float((result.get("steps", []) as Array).size()) * STEP_DELAY if action["type"] == "attack" else 0.0
-	_animate_effects(result.get("visual_effects", []), delay)
-	_animate_new_statuses(units, positions)
-	if _state().turn_number != previous_turn:
-		_show_banner("%s's turn" % _state().active_player().display_name, Color(1.0, 0.88, 0.50))
+	effect_layer.play(action, result, positions, units, previous_turn, previous_player)
+	if action["type"] == "attack" and ai_timer != null:
+		ai_timer.start(AI_STEP_SECONDS + (result["steps"] as Array).size() * MatchEffects.STEP_DELAY)
 	if _state().phase == GameState.Phase.GAME_OVER:
 		if GameSettings.reduce_motion:
 			gameover_panel.modulate.a = 1.0
 		else:
 			gameover_panel.modulate.a = 0.0
 			gameover_panel.create_tween().tween_property(gameover_panel, "modulate:a", 1.0, 0.5)
-
-func _animate_tactic(action: Dictionary, positions: Dictionary, units: Dictionary) -> void:
-	var card: CardData = CardCatalog.get_card(str(action["card_id"]))
-	var target_id: String = str(action["target_id"])
-	var target_tile: Vector2i = positions[target_id]
-	var cell: BattleCell = _cell_at(target_tile)
-	match card.tactic_effect:
-		"heal":
-			cell.flash(Color(0.6, 1.0, 0.6))
-			var healed: UnitState = _state().find_unit(target_id)
-			var amount: int = healed.current_hp - int(units[target_id]["hp"])
-			cell.floating_text("+%d HP" % amount, Color(0.5, 1.0, 0.5))
-		"damage":
-			cell.flash(Color(1.0, 0.4, 0.4))
-			cell.floating_text("-%d" % mini(card.magnitude, int(units[target_id]["hp"])), Color(1.0, 0.4, 0.4))
-		"buff":
-			cell.flash(Color(1.0, 0.9, 0.5))
-			cell.floating_text(card.card_name, Color(1.0, 0.9, 0.5))
-		"burn", "chill", "sow":
-			var tint: Color = {"burn": Color(1.0, 0.55, 0.2), "chill": Color(0.5, 0.8, 1.0), "sow": Color(0.5, 1.0, 0.5)}[card.tactic_effect]
-			cell.flash(tint)
-			cell.floating_text("%s -%d" % [card.card_name, mini(card.magnitude, int(units[target_id]["hp"]))] if card.tactic_effect == "burn" else card.card_name, tint)
-		_:
-			if action.has("destination"):
-				_animate_unit_move(target_tile, action["destination"], units[target_id])
-				_cell_at(action["destination"]).pulse()
-
-func _animate_attack(result: Dictionary, positions: Dictionary, units: Dictionary) -> void:
-	var steps: Array = result["steps"]
-	for index in range(steps.size()):
-		var step: Dictionary = steps[index]
-		var cell: BattleCell = _cell_at(positions[str(step["target"])])
-		var delay: float = index * STEP_DELAY
-		var source_tile: Vector2i = positions[str(step["source"])]
-		var target_tile: Vector2i = positions[str(step["target"])]
-		var ranged: bool = BoardState.distance(source_tile, target_tile) > 1
-		var magic: bool = int(units[str(step["source"])]["weapon"]) == CardData.WeaponType.MAGIC
-		_animate_projectile(source_tile, target_tile, "*" if magic else (">" if ranged else "/"), delay, Color(0.75, 0.6, 1.0) if magic else Color(1.0, 0.85, 0.55))
-		cell.flash(Color(1.0, 0.4, 0.4), delay + (0.0 if GameSettings.reduce_motion else 0.18))
-		var label: String = "%s -%d" % [str(step["kind"]).replace("_", " ").capitalize(), int(step["damage"])]
-		cell.floating_text(label, Color(1.0, 0.45, 0.4), delay + (0.0 if GameSettings.reduce_motion else 0.18))
-	if ai_timer != null:
-		ai_timer.start(AI_STEP_SECONDS + steps.size() * STEP_DELAY)
-
-func _animate_effects(effects: Array, delay: float) -> void:
-	for effect: Dictionary in effects:
-		var kind: String = str(effect["kind"])
-		if kind == "draw":
-			_show_banner("%s draws a card" % _state().players[int(effect["player"])].display_name, Color(0.7, 0.85, 1.0))
-			continue
-		var cell: BattleCell = _cell_at(effect["tile"])
-		if handoff_panel.visible:
-			_show_banner("%s at %s" % [kind.capitalize(), str(effect["tile"])], Color(1.0, 0.85, 0.55))
-		match kind:
-			"defeat":
-				cell.floating_text("Defeated", Color(0.85, 0.85, 0.85), delay)
-				_animate_defeat(effect, delay)
-			"lava", "burn":
-				cell.flash(Color(1.0, 0.35, 0.12), delay)
-				cell.floating_text("%s -%d" % [kind.capitalize(), int(effect["amount"])], Color(1.0, 0.5, 0.25), delay)
-			"heal":
-				cell.flash(Color(0.5, 1.0, 0.5), delay)
-				cell.floating_text("+%d HP" % int(effect["amount"]), Color(0.5, 1.0, 0.5), delay)
-			"bloom":
-				cell.flash(Color(0.4, 1.0, 0.5), delay)
-				cell.floating_text("Bloom", Color(0.5, 1.0, 0.5), delay)
-			"shrine":
-				cell.flash(Color(0.8, 0.5, 1.0), delay)
-				cell.floating_text("+%d supply" % int(effect["amount"]), Color(0.85, 0.65, 1.0), delay)
-			"objective":
-				cell.flash(Color(1.0, 0.85, 0.3), delay)
-				cell.floating_text("+1 VP", Color(1.0, 0.85, 0.3), delay)
-
-func _animate_new_statuses(units: Dictionary, positions: Dictionary) -> void:
-	for unit_id: String in units:
-		var unit: UnitState = _state().find_unit(unit_id)
-		if unit == null or unit.current_hp <= 0:
-			continue
-		for status: String in unit.statuses:
-			if not (units[unit_id]["statuses"] as Dictionary).has(status):
-				var tint: Color = Color(1.0, 0.55, 0.2) if status == "burn" else Color(0.5, 0.8, 1.0)
-				_cell_at(positions[unit_id]).floating_text(status.capitalize(), tint)
-
-func _effect_label(text: String, color: Color) -> Label:
-	var label := Label.new()
-	label.text = text
-	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.add_theme_font_size_override("font_size", 18)
-	label.add_theme_color_override("font_color", color)
-	label.add_theme_color_override("font_outline_color", Color.BLACK)
-	label.add_theme_constant_override("outline_size", 5)
-	effect_layer.add_child(label)
-	return label
-
-func _animate_unit_move(origin: Vector2i, destination: Vector2i, unit: Dictionary) -> void:
-	if GameSettings.reduce_motion:
-		return
-	var label: Label = _effect_label(str(unit["name"]), OWNER_TEXT[int(unit["owner"])])
-	var background := StyleBoxFlat.new()
-	background.bg_color = Color(0.08, 0.10, 0.15, 0.92)
-	background.set_corner_radius_all(4)
-	background.set_content_margin_all(4)
-	label.add_theme_stylebox_override("normal", background)
-	label.global_position = _cell_at(origin).global_position + Vector2(10, 15)
-	var destination_cell: BattleCell = _cell_at(destination)
-	destination_cell.text = ""
-	destination_cell.hp_bar.visible = false
-	destination_cell.stripe.visible = false
-	var tween: Tween = label.create_tween()
-	tween.tween_property(label, "global_position", _cell_at(destination).global_position + Vector2(10, 15), 0.25)
-	tween.tween_callback(func() -> void:
-		var occupant: UnitState = _state().board.unit_at(destination)
-		if occupant != null and occupant.instance_id == str(unit["id"]):
-			_refresh_cell(destination))
-	tween.tween_property(label, "modulate:a", 0.0, 0.15)
-	tween.tween_callback(label.queue_free)
-
-func _animate_projectile(origin: Vector2i, destination: Vector2i, symbol: String, delay: float, color: Color) -> void:
-	if GameSettings.reduce_motion:
-		return
-	var label: Label = _effect_label(symbol, color)
-	label.add_theme_font_size_override("font_size", 30)
-	label.global_position = _cell_at(origin).global_position + _cell_at(origin).size / 2.0
-	label.modulate.a = 0.0
-	var tween: Tween = label.create_tween()
-	tween.tween_interval(delay)
-	tween.tween_property(label, "modulate:a", 1.0, 0.0)
-	tween.tween_property(label, "global_position", _cell_at(destination).global_position + _cell_at(destination).size / 2.0, 0.18)
-	tween.tween_property(label, "modulate:a", 0.0, 0.1)
-	tween.tween_callback(label.queue_free)
-
-func _animate_defeat(effect: Dictionary, delay: float) -> void:
-	if GameSettings.reduce_motion:
-		return
-	var label: Label = _effect_label(str(effect["name"]), OWNER_TEXT[int(effect["owner"])])
-	label.global_position = _cell_at(effect["tile"]).global_position + Vector2(10, 15)
-	label.modulate.a = 0.0
-	var tween: Tween = label.create_tween()
-	tween.tween_interval(delay)
-	tween.tween_property(label, "modulate:a", 1.0, 0.0)
-	tween.tween_property(label, "modulate:a", 0.0, 0.4)
-	tween.tween_callback(label.queue_free)
-
-func _animate_card_play(card_name: String, player_id: int, target: Vector2i) -> void:
-	if GameSettings.reduce_motion:
-		_cell_at(target).floating_text(card_name, Color(1.0, 0.9, 0.6))
-		return
-	var label: Label = _effect_label(card_name, Color(1.0, 0.9, 0.6))
-	label.global_position = summary_panels[player_id].global_position
-	var tween: Tween = label.create_tween()
-	tween.tween_property(label, "global_position", _cell_at(target).global_position + Vector2(10, 15), 0.25)
-	tween.tween_property(label, "modulate:a", 0.0, 0.2)
-	tween.tween_callback(label.queue_free)
-
-func _show_banner(text: String, color: Color) -> void:
-	var banner_count: int = 0
-	for child in effect_layer.get_children():
-		if child.has_meta("banner"):
-			banner_count += 1
-	var label: Label = _effect_label(text, color)
-	label.set_meta("banner", true)
-	label.global_position = phase_label.global_position + Vector2(0, 30 + 24 * banner_count)
-	var tween: Tween = label.create_tween()
-	if GameSettings.reduce_motion:
-		tween.tween_interval(0.9)
-	else:
-		label.modulate.a = 0.0
-		tween.tween_property(label, "modulate:a", 1.0, 0.1)
-		tween.tween_interval(0.45)
-		tween.tween_property(label, "modulate:a", 0.0, 0.2)
-	tween.tween_callback(label.queue_free)
 
 func _ai_step() -> void:
 	if _state().phase == GameState.Phase.GAME_OVER or not _is_ai_turn():
@@ -1269,9 +1055,9 @@ func _refresh_summaries() -> void:
 	var state := _state()
 	for index in range(state.players.size()):
 		var player: PlayerState = state.players[index]
-		summary_panels[index].show_player(player, index == state.active_player_id, OWNER_TEXT[index])
+		summary_panels[index].show_player(player, index == state.active_player_id, MatchEffects.OWNER_TEXT[index])
 		if index < status_panels.size():
-			status_panels[index].show_player(player, index == state.active_player_id, OWNER_TEXT[index])
+			status_panels[index].show_player(player, index == state.active_player_id, MatchEffects.OWNER_TEXT[index])
 
 func _refresh_controls() -> void:
 	var state := _state()

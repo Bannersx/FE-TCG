@@ -14,6 +14,10 @@ var _animation_scenario: bool = false
 var _animation_scene: Control
 var _confirmation_scenario: bool = false
 var _confirmation_scene: Control
+var _drop_once: bool = false
+var _dropped: bool = false
+var _stay: bool = false
+var _late_join: bool = false
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -24,7 +28,7 @@ func _run() -> void:
 	online.snapshot_received.connect(_on_snapshot_received)
 	online.action_result_received.connect(_on_action_result)
 	online.match_ended.connect(_on_match_ended)
-	online.status_changed.connect(func(message: String) -> void: print("STATUS: %s" % message))
+	online.status_changed.connect(_on_status)
 	var options: Dictionary = _parse_options(OS.get_cmdline_user_args())
 	var army_id: String = str(options.get("army", ArmyCatalog.IRONCREST_ID))
 	_player_count = int(options.get("players", 2))
@@ -34,6 +38,9 @@ func _run() -> void:
 	_submit_first_action = _is_enabled(options.get("submit", false))
 	_wait_for_disconnect = _is_enabled(options.get("wait_disconnect", false))
 	_test_invalid_action = _is_enabled(options.get("test_invalid", false))
+	_drop_once = _is_enabled(options.get("drop_once", false))
+	_stay = _is_enabled(options.get("stay", false))
+	_late_join = _is_enabled(options.get("late_join", false))
 	print("SMOKE_OPTIONS: submit=%s wait_disconnect=%s test_invalid=%s" % [
 		_submit_first_action, _wait_for_disconnect, _test_invalid_action,
 	])
@@ -75,6 +82,16 @@ func _on_snapshot_received(state: GameState, viewer_id: int) -> void:
 		_finished = true
 		quit(1)
 		return
+	if _drop_once:
+		if not _dropped:
+			_dropped = true
+			print("DROPPING_CONNECTION: seat=%d" % viewer_id)
+			online.simulate_connection_loss()
+		else:
+			print("RECONNECT_OK: seat=%d" % viewer_id)
+			_finished = true
+			quit(0)
+		return
 	if _confirmation_scenario and viewer_id == 0 and state.phase == GameState.Phase.DEPLOYMENT and _confirmation_scene == null:
 		GameSettings.confirm_actions = true
 		_confirmation_scene = load("res://scenes/main/game_scene.tscn").instantiate()
@@ -98,7 +115,7 @@ func _on_snapshot_received(state: GameState, viewer_id: int) -> void:
 	if _animation_scenario:
 		_animation_step(state, viewer_id)
 		return
-	if state.phase == GameState.Phase.COMMAND and not _cycle_turns:
+	if state.phase == GameState.Phase.COMMAND and not _cycle_turns and not _late_join:
 		var visual: Dictionary = online.get("current_visual_action")
 		if visual.is_empty() or str(visual["action"].get("type", "")) != "advance_phase" \
 				or not visual["result"].has("visual_effects"):
@@ -131,6 +148,9 @@ func _on_snapshot_received(state: GameState, viewer_id: int) -> void:
 			return
 	var action_complete: bool = _action_accepted if _submit_first_action else not _wait_for_disconnect
 	if state.phase == GameState.Phase.COMMAND and action_complete:
+		if _stay:
+			print("HOLDING_SEAT: seat=%d" % viewer_id)
+			return
 		print("NETWORK_SMOKE_OK: seat=%d active=%d phase=%d" % [viewer_id, state.active_player_id, state.phase])
 		_finished = true
 		quit(0)
@@ -189,7 +209,14 @@ func _verify_remote_animation() -> void:
 
 func _on_match_ended(message: String) -> void:
 	print("MATCH_ENDED: %s" % message)
-	if _wait_for_disconnect and message == "Your opponent disconnected.":
+	if _drop_once and not _dropped:
+		push_error("Match ended before the simulated drop: %s" % message)
+		_finished = true
+		quit(1)
+
+func _on_status(message: String) -> void:
+	print("STATUS: %s" % message)
+	if _wait_for_disconnect and message.contains("Waiting up to"):
 		print("DISCONNECT_SMOKE_OK")
 		_finished = true
 		quit(0)
