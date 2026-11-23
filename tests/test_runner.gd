@@ -7,6 +7,8 @@ func _init() -> void:
 	_test_collection_and_decks()
 	_test_setup_and_turns()
 	_test_movement_and_terrain()
+	_test_new_terrain()
+	_test_visual_effect_events()
 	_test_combat()
 	_test_equipment()
 	_test_tactics()
@@ -22,6 +24,8 @@ func _init() -> void:
 
 func _run_extra_tests() -> void:
 	_test_engine_clone()
+	_test_game_state_codec()
+	_test_four_player_mode()
 	_test_armies()
 	_test_setup()
 	_test_contested_objectives()
@@ -187,6 +191,114 @@ func _test_engine_clone() -> void:
 	_expect(opponent.hand.size() == real.hand.size() and opponent.deck.size() == real.deck.size(), "hidden-information clone keeps hand and deck sizes")
 	_expect(hidden.state.players[0].hand == engine.state.players[0].hand, "hidden-information clone keeps the viewer's own hand")
 
+func _test_game_state_codec() -> void:
+	var engine := GameEngine.new(89)
+	var snapshot: Dictionary = GameStateCodec.encode(engine.state, 0)
+	var opponent_data: Dictionary = snapshot["players"][1]
+	_expect(not opponent_data.has("hand_card_ids") and not opponent_data.has("deck_card_ids"), "state snapshots omit the other player's hidden card identities")
+	_expect(int(opponent_data["hand_count"]) == engine.state.players[1].hand.size(), "state snapshots preserve the other player's hand size")
+	var decoded_result: Dictionary = GameStateCodec.decode(snapshot)
+	_expect(bool(decoded_result["ok"]), "a filtered game-state snapshot decodes")
+	if bool(decoded_result["ok"]):
+		var decoded: GameState = decoded_result["state"]
+		var own_hand_matches: bool = decoded.players[0].hand.size() == engine.state.players[0].hand.size()
+		for index in range(mini(decoded.players[0].hand.size(), engine.state.players[0].hand.size())):
+			if decoded.players[0].hand[index].card_id != engine.state.players[0].hand[index].card_id:
+				own_hand_matches = false
+		_expect(own_hand_matches, "decoded state preserves the viewing player's hand")
+		_expect(decoded.players[1].hand.size() == engine.state.players[1].hand.size(), "decoded state preserves the opponent's hidden hand size")
+		var opponent_hand_hidden: bool = true
+		for card: CardData in decoded.players[1].hand:
+			if card.card_id != GameStateCodec.HIDDEN_CARD_ID:
+				opponent_hand_hidden = false
+		_expect(opponent_hand_hidden, "decoded opponent hand contains no card identities")
+		_expect(decoded.board.terrain == engine.state.board.terrain, "decoded state preserves board terrain")
+		_expect(decoded.players[0].commander.current_hp == engine.state.players[0].commander.current_hp, "decoded state reconnects commander references")
+	var invalid_snapshot: Dictionary = snapshot.duplicate(true)
+	invalid_snapshot["version"] = GameStateCodec.VERSION + 1
+	_expect(not bool(GameStateCodec.decode(invalid_snapshot)["ok"]), "unsupported game-state snapshots are rejected")
+	var leaking_snapshot: Dictionary = snapshot.duplicate(true)
+	leaking_snapshot["players"][1]["hand_card_ids"] = ["heal"]
+	_expect(not bool(GameStateCodec.decode(leaking_snapshot)["ok"]), "state decoder rejects leaked opponent card identities")
+
+func _test_four_player_mode() -> void:
+	var duel := GameEngine.new(31)
+	var game := GameEngine.new(32, [], false, [], 0, 4)
+	var state: GameState = game.state
+	_expect(state.players.size() == 4 and state.board.width == 9 and state.board.height == 9, "four-player game has four seats and a 9x9 board")
+	var corners: Array[Vector2i] = [Vector2i(0, 0), Vector2i(8, 0), Vector2i(8, 8), Vector2i(0, 8)]
+	for player_id in range(4):
+		var player: PlayerState = state.players[player_id]
+		_expect(player.commander.position == corners[player_id], "four-player commander %d starts in its corner" % player_id)
+		_expect(state.board.is_deployment_tile(player_id, corners[player_id]) and not state.board.is_deployment_tile((player_id + 1) % 4, corners[player_id]), "four-player deployment zones do not overlap")
+	_end_turn(game)
+	_expect(state.active_player_id == 1 and state.players[1].hand.size() == 5, "second player starts without an extra draw")
+	_end_turn(game)
+	_end_turn(game)
+	_end_turn(game)
+	_expect(state.active_player_id == 0 and state.players[0].hand.size() == 6, "turn order wraps and first player draws on their second turn")
+	_expect(duel.state.board.width == 7 and duel.state.board.commander_position(1) == Vector2i(6, 3), "four-player board does not change a concurrent duel")
+	for viewer in range(4):
+		var snapshot: Dictionary = GameStateCodec.encode(state, viewer)
+		var privacy_ok: bool = true
+		for other in range(4):
+			if other != viewer and (snapshot["players"][other].has("hand_card_ids") or snapshot["players"][other].has("deck_card_ids")):
+				privacy_ok = false
+		var decoded: Dictionary = GameStateCodec.decode(snapshot)
+		_expect(privacy_ok and bool(decoded["ok"]), "four-player snapshot hides every opponent and decodes for seat %d" % viewer)
+		if bool(decoded["ok"]):
+			_expect((decoded["state"] as GameState).board.width == 9 and duel.state.board.width == 7, "four-player snapshot preserves independent board dimensions")
+
+	var battle := GameEngine.new(33, [], false, [], 0, 4)
+	var attacker := _spawn(battle, "swiftblade", 0, Vector2i(7, 8))
+	attacker.mods.append({"stat": "attack", "amount": 20, "expires": "end_of_turn"})
+	var eliminated_unit := _spawn(battle, "iron_guard", 2, Vector2i(6, 7))
+	battle.state.seeds[Vector2i(5, 7)] = 2
+	battle.state.players[2].commander.current_hp = 1
+	_command_phase(battle, 0)
+	_act(battle, {"type": "start_activation", "unit_id": attacker.instance_id})
+	var attack: Dictionary = {"type": "attack", "target_id": battle.state.players[2].commander.instance_id, "support": false}
+	_expect(ActionGenerator.legal_actions(battle.state).has(attack), "online action generation includes attacks against the third player")
+	_expect(bool(_act(battle, attack)["ok"]), "can attack any opposing commander")
+	_expect(battle.state.players[2].eliminated and battle.state.phase != GameState.Phase.GAME_OVER, "commander defeat eliminates one player without ending a four-player match")
+	_expect(battle.state.board.unit_at(eliminated_unit.position) == null and not battle.state.seeds.has(Vector2i(5, 7)), "elimination removes units and seeds")
+	battle.state.active_player_id = 1
+	battle.state.phase = GameState.Phase.COMMAND
+	_end_turn(battle)
+	_expect(battle.state.active_player_id == 3, "turn order skips eliminated players")
+	var copy: GameEngine = battle.clone()
+	_expect(copy.state.players[2].eliminated and copy.state.board.width == 9, "clone preserves four-player elimination and board")
+	_expect(bool(GameStateCodec.decode(GameStateCodec.encode(battle.state, 3))["ok"]), "eliminated-player state round-trips through snapshots")
+
+	var exhausted := GameEngine.new(34, [], false, [], 0, 4)
+	exhausted.state.players[1].turns_started = 1
+	exhausted.state.players[1].deck.clear()
+	exhausted.state.phase = GameState.Phase.COMMAND
+	_end_turn(exhausted)
+	_expect(exhausted.state.players[1].eliminated and exhausted.state.active_player_id == 2, "deck exhaustion eliminates a player and starts the next turn")
+	exhausted._eliminate_player(exhausted.state.players[2])
+	exhausted._eliminate_player(exhausted.state.players[3])
+	exhausted._check_victory()
+	_expect(exhausted.state.winner_id == 0 and exhausted.state.game_over_reason == "last player standing", "last remaining player wins")
+
+	var burning := GameEngine.new(37, [], false, [], 0, 4)
+	burning.state.players[1].commander.current_hp = 1
+	burning.state.players[1].commander.apply_status("burn", 1)
+	burning.state.phase = GameState.Phase.COMMAND
+	_end_turn(burning)
+	_expect(burning.state.players[1].eliminated and burning.state.active_player_id == 2, "commander burn eliminates the active player and advances the turn")
+
+	var scoring := GameEngine.new(35, [], false, [], 0, 4)
+	_spawn(scoring, "iron_guard", 1, scoring.state.board.objective_positions[0])
+	scoring.state.players[1].victory_points = 5
+	_end_turn(scoring)
+	_expect(scoring.state.winner_id == 1 and scoring.state.game_over_reason == "objectives captured", "six objective points win the four-player game")
+
+	var setup := GameEngine.new(36, [], false, [], 1, 4)
+	for player_id in range(4):
+		_expect(setup.state.active_player_id == player_id and bool(_act(setup, {"type": "pass_setup"})["ok"]), "terrain setup advances through four players")
+	_expect(setup.state.phase == GameState.Phase.DEPLOYMENT and setup.state.active_player_id == 0, "four-player game starts after terrain setup")
+
 func _fingerprint(engine: GameEngine) -> String:
 	var parts: PackedStringArray = []
 	parts.append("%d %d %d %d" % [engine.state.turn_number, engine.state.active_player_id, engine.state.phase, engine.state.current_activation_unit_id.length()])
@@ -262,6 +374,15 @@ func _test_setup() -> void:
 	_expect(not BoardState.objectives_reachable(wall), "a mountain wall fails the reachability check")
 	var options: Array[Dictionary] = GameEngine.terrain_options(s, 0)
 	_expect(not options.is_empty(), "terrain options exist")
+	var generated_setup_actions: Array[Dictionary] = ActionGenerator.legal_actions(s)
+	var has_setup_actions: bool = false
+	var has_invalid_advance: bool = false
+	for action: Dictionary in generated_setup_actions:
+		if action["type"] == "place_terrain" or action["type"] == "pass_setup":
+			has_setup_actions = true
+		if action["type"] == "advance_phase":
+			has_invalid_advance = true
+	_expect(has_setup_actions and not has_invalid_advance, "action generator exposes terrain setup actions only")
 	var first: Dictionary = options[0]
 	_expect(bool(_act(engine, first)["ok"]), "legal placement accepted")
 	_expect(s.active_player_id == 1 and s.setup_left[0] == 1, "placement alternates players")
@@ -474,6 +595,140 @@ func _test_movement_and_terrain() -> void:
 	var walker := _spawn(block_engine, "oakblade", 0, Vector2i(1, 3))
 	_spawn(block_engine, "ash_reaver", 1, Vector2i(2, 3))
 	_expect(not MovementResolver.can_reach(block_engine.state.board, walker, Vector2i(2, 3)), "cannot move onto occupied tile")
+
+func _test_new_terrain() -> void:
+	var setup := GameEngine.new(7, [], false, [], 3)
+	var new_terrain: Array[String] = [
+		BoardState.ROAD, BoardState.RIVER, BoardState.BRIDGE, BoardState.HIGH_GROUND,
+		BoardState.RUINS, BoardState.LAVA, BoardState.SHRINE,
+	]
+	for terrain: String in new_terrain:
+		_expect(GameEngine.terrain_error(setup.state, 0, Vector2i(3, 0), terrain) == "", "%s is available in setup" % terrain)
+	var roundtrip_game := _new_engine()
+	for index in range(new_terrain.size()):
+		roundtrip_game.state.board.terrain[Vector2i(index, 1)] = new_terrain[index]
+	var terrain_snapshot: Dictionary = GameStateCodec.encode(roundtrip_game.state, 0)
+	var terrain_decoded: Dictionary = GameStateCodec.decode(terrain_snapshot)
+	_expect(bool(terrain_decoded["ok"]) and (terrain_decoded["state"] as GameState).board.terrain == roundtrip_game.state.board.terrain, "all new terrain survives an online snapshot")
+	terrain_snapshot["used_shrines"] = [{"x": 0, "y": 1}]
+	_expect(not bool(GameStateCodec.decode(terrain_snapshot)["ok"]), "snapshots reject used shrines on non-shrine tiles")
+
+	var engine := _new_engine()
+	var board: BoardState = engine.state.board
+	var unit := _spawn(engine, "ash_reaver", 0, Vector2i(1, 3))
+	var target := Vector2i(4, 3)
+	_expect(not MovementResolver.can_reach(board, unit, target), "normal movement cannot reach three tiles away")
+	board.terrain[unit.position] = BoardState.ROAD
+	_expect(MovementResolver.can_reach(board, unit, target), "starting on a road grants one movement")
+	board.terrain[unit.position] = BoardState.PLAIN
+	board.terrain[Vector2i(2, 3)] = BoardState.ROAD
+	_expect(not MovementResolver.can_reach(board, unit, target), "entering a road does not grant movement during that move")
+	board.terrain[Vector2i(2, 3)] = BoardState.RIVER
+	_expect(board.movement_cost(Vector2i(2, 3), CardData.MovementType.GROUND) == 2, "river slows ground units")
+	_expect(board.movement_cost(Vector2i(2, 3), CardData.MovementType.FLYING) == 1, "fliers ignore river movement cost")
+	board.terrain[Vector2i(2, 3)] = BoardState.BRIDGE
+	_expect(board.movement_cost(Vector2i(2, 3), CardData.MovementType.GROUND) == 1, "bridge has normal ground movement")
+
+	var archer := _spawn(engine, "hawkeye", 0, Vector2i(2, 2))
+	var defender := _spawn(engine, "iron_guard", 1, Vector2i(4, 2))
+	board.terrain[archer.position] = BoardState.PLAIN
+	board.terrain[defender.position] = BoardState.PLAIN
+	var damage: int = CombatResolver.calculate_damage(board, archer, defender)
+	board.terrain[archer.position] = BoardState.HIGH_GROUND
+	_expect(CombatResolver.calculate_damage(board, archer, defender) == damage + 1, "high ground improves ranged attacks")
+	board.terrain[defender.position] = BoardState.RUINS
+	_expect(CombatResolver.calculate_damage(board, archer, defender) == damage, "ruins protect against ranged attacks")
+	defender.position = Vector2i(3, 2)
+	board.terrain[defender.position] = BoardState.RUINS
+	var melee_damage: int = CombatResolver.calculate_damage(board, archer, defender)
+	board.terrain[archer.position] = BoardState.PLAIN
+	board.terrain[defender.position] = BoardState.PLAIN
+	_expect(CombatResolver.calculate_damage(board, archer, defender) == melee_damage, "high ground and ruins do not change adjacent attacks")
+
+	var shrine_game := _new_engine()
+	var shrine_unit := _spawn(shrine_game, "ash_reaver", 0, Vector2i(1, 3))
+	var shrine := Vector2i(2, 3)
+	shrine_game.state.board.terrain[shrine] = BoardState.SHRINE
+	shrine_game.state.players[0].current_supply = 1
+	_command_phase(shrine_game)
+	_act(shrine_game, {"type": "start_activation", "unit_id": shrine_unit.instance_id})
+	_expect(bool(_act(shrine_game, {"type": "move", "destination": shrine})["ok"]) and shrine_game.state.players[0].current_supply == 2, "landing on a shrine grants supply above the current maximum")
+	var copy: GameEngine = shrine_game.clone()
+	_expect(copy.state.used_shrines.has(shrine), "clones preserve used shrines")
+	var snapshot: Dictionary = GameStateCodec.encode(shrine_game.state, 0)
+	var decoded: Dictionary = GameStateCodec.decode(snapshot)
+	_expect(bool(decoded["ok"]) and (decoded["state"] as GameState).used_shrines.has(shrine), "online snapshots preserve used shrines")
+	_act(shrine_game, {"type": "wait"})
+	_give(shrine_game, 0, ["reposition", "reposition"], 4)
+	_act(shrine_game, {"type": "play_tactic", "card_id": "reposition", "target_id": shrine_unit.instance_id, "destination": Vector2i(1, 3)})
+	_act(shrine_game, {"type": "play_tactic", "card_id": "reposition", "target_id": shrine_unit.instance_id, "destination": shrine})
+	_expect(shrine_game.state.players[0].current_supply == 2, "a shrine cannot grant supply twice in one turn, including tactic movement")
+	_end_turn(shrine_game)
+	_expect(shrine_game.state.used_shrines.is_empty(), "shrines refresh for the next player's turn")
+	shrine_game.state.active_player_id = 0
+	shrine_game.state.phase = GameState.Phase.DEPLOYMENT
+	shrine_game.state.board.move_unit(shrine_unit, Vector2i(1, 3))
+	_give(shrine_game, 0, ["reposition"], GameEngine.MAX_SUPPLY)
+	_act(shrine_game, {"type": "play_tactic", "card_id": "reposition", "target_id": shrine_unit.instance_id, "destination": shrine})
+	_expect(shrine_game.state.players[0].current_supply == GameEngine.MAX_SUPPLY and shrine_game.state.used_shrines.has(shrine), "tactic movement activates a refreshed shrine without exceeding the supply cap")
+	var full_supply := _new_engine()
+	var full_unit := _spawn(full_supply, "ash_reaver", 0, Vector2i(1, 3))
+	full_supply.state.board.terrain[shrine] = BoardState.SHRINE
+	full_supply.state.players[0].current_supply = GameEngine.MAX_SUPPLY
+	_command_phase(full_supply)
+	_act(full_supply, {"type": "start_activation", "unit_id": full_unit.instance_id})
+	_act(full_supply, {"type": "move", "destination": shrine})
+	_expect(full_supply.state.players[0].current_supply == GameEngine.MAX_SUPPLY and full_supply.state.used_shrines.has(shrine), "a shrine at full supply is consumed without exceeding the cap")
+	var second_shrine := Vector2i(1, 2)
+	full_supply.state.board.terrain[second_shrine] = BoardState.SHRINE
+	_act(full_supply, {"type": "wait"})
+	_give(full_supply, 0, ["reposition"], 3)
+	_act(full_supply, {"type": "play_tactic", "card_id": "reposition", "target_id": full_unit.instance_id, "destination": second_shrine})
+	_expect(full_supply.state.players[0].current_supply == 3 and full_supply.state.used_shrines.has(second_shrine), "a different shrine can grant supply in the same turn")
+
+	var lava_game := _new_engine()
+	var ground := _spawn(lava_game, "ash_reaver", 0, Vector2i(1, 3))
+	var flyer := _spawn(lava_game, "gale_rider", 0, Vector2i(1, 2))
+	lava_game.state.board.terrain[ground.position] = BoardState.LAVA
+	lava_game.state.board.terrain[flyer.position] = BoardState.LAVA
+	ground.current_hp = 1
+	var flyer_hp: int = flyer.current_hp
+	_end_turn(lava_game)
+	_expect(not lava_game.state.players[0].units.has(ground) and lava_game.state.players[0].fallen.has(ground.card), "lava defeats ground units through normal defeat handling")
+	_expect(flyer.current_hp == flyer_hp, "flying units are immune to lava")
+	var lethal := _new_engine()
+	lethal.state.board.terrain[lethal.state.players[0].commander.position] = BoardState.LAVA
+	lethal.state.players[0].commander.current_hp = 1
+	_end_turn(lethal)
+	_expect(lethal.state.phase == GameState.Phase.GAME_OVER and lethal.state.winner_id == 1, "lava commander defeat ends the match before the next turn")
+	var four := GameEngine.new(8, [], false, [], 0, 4)
+	four.state.board.terrain[four.state.players[0].commander.position] = BoardState.LAVA
+	four.state.players[0].commander.current_hp = 1
+	_end_turn(four)
+	_expect(four.state.players[0].eliminated and four.state.active_player_id == 1 and four.state.phase != GameState.Phase.GAME_OVER, "lava eliminates a four-player commander and advances to the next survivor")
+
+func _test_visual_effect_events() -> void:
+	var engine := _new_engine()
+	var ground := _spawn(engine, "ash_reaver", 0, Vector2i(1, 3))
+	ground.current_hp = 1
+	engine.state.board.terrain[ground.position] = BoardState.LAVA
+	var healed := _spawn(engine, "iron_guard", 1, Vector2i(5, 1))
+	healed.current_hp -= 2
+	engine.state.board.terrain[healed.position] = BoardState.FORT
+	engine.state.seeds[healed.position] = 1
+	var burned := _spawn(engine, "iron_guard", 1, Vector2i(5, 2))
+	burned.apply_status("burn", 2)
+	_spawn(engine, "iron_guard", 1, Vector2i(3, 3))
+	_command_phase(engine)
+	var result: Dictionary = _act(engine, {"type": "advance_phase"})
+	var kinds: Array[String] = []
+	for effect: Dictionary in result["visual_effects"]:
+		kinds.append(str(effect["kind"]))
+		if effect["kind"] == "draw":
+			_expect(not effect.has("card_id"), "draw animation event does not reveal the drawn card")
+	for kind: String in ["lava", "defeat", "draw", "heal", "burn", "bloom", "objective"]:
+		_expect(kinds.has(kind), "%s produces a cosmetic event" % kind)
+	_expect(engine.state.active_player_id == 1 and not engine.state.players[0].units.has(ground), "cosmetic events do not change turn or defeat outcomes")
 
 func _test_combat() -> void:
 	var board := BoardState.new()

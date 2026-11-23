@@ -9,12 +9,16 @@ const WIN_POINTS: int = 6
 
 var state: GameState = GameState.new()
 var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+var _visual_effects: Array[Dictionary] = []
 
 # decks: optional per-seat arrays of card ids; missing seats use their starter deck.
-func _init(match_seed: int = 0, decks: Array = [], blank: bool = false, armies: Array = [], setup_tiles: int = 0) -> void:
+func _init(match_seed: int = 0, decks: Array = [], blank: bool = false, armies: Array = [], setup_tiles: int = 0, player_count: int = 2) -> void:
 	rng.seed = match_seed if match_seed != 0 else int(Time.get_ticks_usec())
 	if not blank:
-		_initialize_match(decks, armies, setup_tiles)
+		assert(player_count in [2, 4], "Only two-player and four-player matches are supported.")
+		if player_count == 4:
+			state.board = BoardState.new(9, 9, "four_corners")
+		_initialize_match(decks, armies, setup_tiles, player_count)
 
 # Independent deep copy for lookahead. With `viewer_id` >= 0 the opponent's hidden cards (hand and deck) are
 # pooled and redealt randomly, so a search run for `viewer_id` never relies on information that player cannot see.
@@ -23,9 +27,12 @@ func clone(viewer_id: int = -1) -> GameEngine:
 	copy.rng.seed = rng.randi()
 	var source: GameState = state
 	var target: GameState = copy.state
+	target.board = BoardState.new(source.board.width, source.board.height, source.board.objective_layout)
 	target.board.terrain = source.board.terrain.duplicate()
 	target.setup_left = source.setup_left.duplicate()
-	target.setup_used = [source.setup_used[0].duplicate(), source.setup_used[1].duplicate()]
+	target.setup_used.clear()
+	for used: Dictionary in source.setup_used:
+		target.setup_used.append(used.duplicate())
 	target.active_player_id = source.active_player_id
 	target.phase = source.phase
 	target.turn_number = source.turn_number
@@ -39,12 +46,15 @@ func clone(viewer_id: int = -1) -> GameEngine:
 	target.activation_moved_tiles = source.activation_moved_tiles
 	target.chain_count = source.chain_count
 	target.seeds = source.seeds.duplicate()
+	target.used_shrines = source.used_shrines.duplicate()
 	for old_player in source.players:
 		var player := PlayerState.new()
 		player.player_id = old_player.player_id
 		player.army_id = old_player.army_id
 		player.tactics_this_turn = old_player.tactics_this_turn
 		player.haste_unit_id = old_player.haste_unit_id
+		player.eliminated = old_player.eliminated
+		player.turns_started = old_player.turns_started
 		player.display_name = old_player.display_name
 		player.deck = old_player.deck.duplicate()
 		player.hand = old_player.hand.duplicate()
@@ -69,6 +79,7 @@ func clone(viewer_id: int = -1) -> GameEngine:
 			unit.mods = old_unit.mods.duplicate(true)
 			unit.statuses = old_unit.statuses.duplicate()
 			player.units.append(unit)
+			_apply_shrine(unit)
 			if old_unit == old_player.commander:
 				player.commander = unit
 			if unit.current_hp > 0:
@@ -96,8 +107,8 @@ static func deploy_error(game: GameState, player_id: int, card: CardData, tile: 
 		return "You already control the maximum number of units."
 	if player.current_supply < card.supply_cost:
 		return "Not enough supply."
-	if tile.x != game.board.deployment_column(player_id) or not game.board.is_valid_position(tile):
-		return "Deploy into your home column."
+	if not game.board.is_deployment_tile(player_id, tile):
+		return "Deploy into your home zone."
 	if game.board.occupants.has(tile):
 		return "That tile is occupied."
 	if game.board.movement_cost(tile, card.movement_type) < 0:
@@ -183,7 +194,7 @@ static func terrain_error(game: GameState, player_id: int, tile: Vector2i, terra
 	if not game.board.is_valid_position(tile):
 		return "Invalid tile."
 	if game.board.is_locked_tile(tile):
-		return "Objectives and deployment columns cannot be changed."
+		return "Objectives and deployment zones cannot be changed."
 	if game.board.terrain_at(tile) == terrain_name:
 		return "That tile is already %s." % terrain_name
 	var cap: int = int(BoardState.PLACEMENT_CAPS.get(terrain_name, 99))
@@ -191,15 +202,15 @@ static func terrain_error(game: GameState, player_id: int, tile: Vector2i, terra
 		return "You may place at most %d %s." % [cap, terrain_name]
 	var layout: Dictionary = game.board.terrain.duplicate()
 	layout[tile] = terrain_name
-	if not BoardState.objectives_reachable(layout):
+	if not game.board.can_reach_objectives(layout):
 		return "That would cut off an objective."
 	return ""
 
 # Every legal placement for the active player (used by the UI highlights and the AI).
 static func terrain_options(game: GameState, player_id: int) -> Array[Dictionary]:
 	var options: Array[Dictionary] = []
-	for y in range(BoardState.HEIGHT):
-		for x in range(BoardState.WIDTH):
+	for y in range(game.board.height):
+		for x in range(game.board.width):
 			for terrain_name in BoardState.PLACEABLE:
 				if terrain_error(game, player_id, Vector2i(x, y), terrain_name) == "":
 					options.append({"type": "place_terrain", "tile": Vector2i(x, y), "terrain": terrain_name})
@@ -210,6 +221,7 @@ static func terrain_options(game: GameState, player_id: int) -> Array[Dictionary
 func submit_action(action: Dictionary) -> Dictionary:
 	if state.phase == GameState.Phase.GAME_OVER:
 		return _fail("The match is over.")
+	_visual_effects.clear()
 	var pid: int = state.active_player_id
 	var kind: String = str(action.get("type", ""))
 	var result: Dictionary
@@ -240,6 +252,7 @@ func submit_action(action: Dictionary) -> Dictionary:
 			return _fail("Unknown action.")
 	if bool(result["ok"]):
 		state.history.append({"turn": state.turn_number, "player": pid, "action": action.duplicate()})
+		result["visual_effects"] = _visual_effects.duplicate(true)
 	return result
 
 func _place_terrain(pid: int, action: Dictionary) -> Dictionary:
@@ -263,14 +276,16 @@ func _pass_setup(pid: int) -> Dictionary:
 	_advance_setup(pid)
 	return _ok()
 
-# Players alternate; a player with nothing left is skipped. When both are done the match begins.
+# Players alternate; a player with nothing left is skipped.
 func _advance_setup(pid: int) -> void:
-	if state.setup_left[1 - pid] > 0:
-		state.active_player_id = 1 - pid
-	elif state.setup_left[pid] <= 0:
-		state.active_player_id = 0
-		state.turn_number = 1
-		_start_turn()
+	for offset in range(1, state.players.size() + 1):
+		var next: int = (pid + offset) % state.players.size()
+		if state.setup_left[next] > 0:
+			state.active_player_id = next
+			return
+	state.active_player_id = 0
+	state.turn_number = 1
+	_start_turn()
 
 func _fail(message: String) -> Dictionary:
 	return {"ok": false, "error": message}
@@ -357,6 +372,8 @@ func _play_tactic(pid: int, action: Dictionary) -> Dictionary:
 	var target: UnitState = state.find_unit(target_id)
 	state.events.append("%s plays %s on %s." % [state.players[pid].display_name, card.card_name, target.card.card_name])
 	var defeated: Array[String] = AbilityResolver.apply(state, card, target_id, destination)
+	if card.tactic_effect in ["reposition", "retreat"]:
+		_apply_shrine(target)
 	_handle_defeats(defeated)
 	_check_victory()
 	return _ok({"defeated": defeated})
@@ -393,6 +410,7 @@ func _move(pid: int, action: Dictionary) -> Dictionary:
 		return _fail("That tile is not reachable.")
 	var origin: Vector2i = unit.position
 	state.board.move_unit(unit, destination)
+	_apply_shrine(unit)
 	state.activation_moved_tiles = BoardState.distance(unit.position, origin)
 	state.current_activation_moved = true
 	return _ok()
@@ -420,6 +438,8 @@ func _attack(pid: int, action: Dictionary) -> Dictionary:
 	_handle_defeats(report["defeated"])
 	_finish_activation(attacker)
 	_check_victory()
+	if state.players.size() == 4 and state.active_player().eliminated and state.phase != GameState.Phase.GAME_OVER:
+		_end_turn()
 	return _ok(report)
 
 func _wait(pid: int) -> Dictionary:
@@ -458,12 +478,15 @@ func _handle_defeats(defeated: Array) -> void:
 
 func _defeat_unit(unit: UnitState) -> void:
 	var owner: PlayerState = state.players[unit.owner_id]
+	_visual_effects.append({"kind": "defeat", "tile": unit.position, "name": unit.display_name(), "owner": unit.owner_id})
 	state.board.remove_unit(unit)
 	unit.current_hp = 0
 	state.events.append("%s is defeated." % unit.card.card_name)
 	if state.current_activation_unit_id == unit.instance_id:
 		state.current_activation_unit_id = ""
 	if unit.is_commander:
+		if state.players.size() == 4:
+			_eliminate_player(owner)
 		return
 	owner.units.erase(unit)
 	owner.fallen.append(unit.card)
@@ -478,16 +501,60 @@ func _defeat_unit(unit: UnitState) -> void:
 	unit.accessory_item = null
 	unit.promotion = null
 
+func _eliminate_player(player: PlayerState) -> void:
+	if player.eliminated:
+		return
+	player.eliminated = true
+	player.commander.current_hp = 0
+	state.board.remove_unit(player.commander)
+	for unit: UnitState in player.units.duplicate():
+		if not unit.is_commander:
+			_defeat_unit(unit)
+	for tile: Vector2i in state.seeds.keys():
+		if int(state.seeds[tile]) == player.player_id:
+			state.seeds.erase(tile)
+	state.events.append("%s is eliminated." % player.display_name)
+
 func _check_victory() -> void:
 	var winner: int = VictoryResolver.check_victory(state)
 	if winner < 0:
 		return
-	var loser: PlayerState = state.players[1 - winner]
-	var reason: String = "enemy commander defeated" if loser.commander.current_hp <= 0 else "objectives captured"
+	var reason: String = "objectives captured"
+	if state.players.size() == 4:
+		if state.players[winner].victory_points < WIN_POINTS:
+			reason = "last player standing"
+	else:
+		var loser: PlayerState = state.players[1 - winner]
+		if loser.commander.current_hp <= 0:
+			reason = "enemy commander defeated"
 	VictoryResolver.finish_if_won(state, winner, reason)
+
+func _apply_shrine(unit: UnitState) -> void:
+	var tile: Vector2i = unit.position
+	if state.board.terrain_at(tile) != BoardState.SHRINE or state.used_shrines.has(tile):
+		return
+	state.used_shrines[tile] = true
+	var player: PlayerState = state.players[unit.owner_id]
+	var gained: int = mini(1, maxi(0, MAX_SUPPLY - player.current_supply))
+	player.current_supply += gained
+	state.events.append("%s activates a shrine (+%d supply)." % [unit.card.card_name, gained])
+	_visual_effects.append({"kind": "shrine", "tile": tile, "amount": gained})
 
 func _end_turn() -> void:
 	var finished: PlayerState = state.active_player()
+	var defeated: Array[String] = []
+	for unit: UnitState in finished.units:
+		if unit.current_hp > 0 and unit.card.movement_type == CardData.MovementType.GROUND \
+				and state.board.terrain_at(unit.position) == BoardState.LAVA:
+			unit.current_hp = maxi(0, unit.current_hp - 1)
+			state.events.append("%s takes 1 lava damage." % unit.card.card_name)
+			_visual_effects.append({"kind": "lava", "tile": unit.position, "amount": 1})
+			if unit.current_hp == 0:
+				defeated.append(unit.instance_id)
+	_handle_defeats(defeated)
+	_check_victory()
+	if state.phase == GameState.Phase.GAME_OVER:
+		return
 	for unit in finished.units:
 		unit.expire_mods("end_of_turn")
 		unit.exhausted = false
@@ -498,7 +565,12 @@ func _end_turn() -> void:
 	state.current_activation_unit_id = ""
 	state.activation_moved_tiles = 0
 	state.activated_unit_ids.clear()
-	state.active_player_id = 1 - state.active_player_id
+	state.used_shrines.clear()
+	for offset in range(1, state.players.size() + 1):
+		var next: int = (state.active_player_id + offset) % state.players.size()
+		if not state.players[next].eliminated:
+			state.active_player_id = next
+			break
 	state.turn_number += 1
 	_start_turn()
 
@@ -509,6 +581,7 @@ func _tick_burn(player: PlayerState) -> void:
 			continue
 		unit.current_hp = maxi(0, unit.current_hp - 1)
 		state.events.append("%s burns for 1." % unit.card.card_name)
+		_visual_effects.append({"kind": "burn", "tile": unit.position, "amount": 1})
 		unit.statuses["burn"] = int(unit.statuses["burn"]) - 1
 		if int(unit.statuses["burn"]) <= 0:
 			unit.statuses.erase("burn")
@@ -528,10 +601,12 @@ func _bloom_seeds(player: PlayerState) -> void:
 		occupant.current_hp = mini(occupant.max_hp(), occupant.current_hp + FactionRules.BLOOM_HEAL)
 		state.chain_count += 1
 		state.events.append("A seed blooms under %s." % occupant.card.card_name)
+		_visual_effects.append({"kind": "bloom", "tile": tile})
 
 func _start_turn() -> void:
 	var player: PlayerState = state.active_player()
 	state.phase = GameState.Phase.DEPLOYMENT
+	player.turns_started += 1
 	player.normal_deployments_this_turn = 0
 	player.tactics_this_turn = 0
 	player.haste_unit_id = ""
@@ -540,29 +615,42 @@ func _start_turn() -> void:
 		unit.expire_mods("until_next_turn")
 	player.max_supply = mini(MAX_SUPPLY, player.max_supply + 1)
 	player.current_supply = player.max_supply
-	var skip_draw: bool = state.turn_number == 1
+	var skip_draw: bool = player.turns_started == 1 if state.players.size() == 4 else state.turn_number == 1
 	if not skip_draw:
 		if player.deck.is_empty():
-			VictoryResolver.finish_if_won(state, 1 - player.player_id, "opponent deck exhausted")
+			if state.players.size() == 4:
+				_eliminate_player(player)
+				_check_victory()
+				if state.phase != GameState.Phase.GAME_OVER:
+					_end_turn()
+			else:
+				VictoryResolver.finish_if_won(state, 1 - player.player_id, "opponent deck exhausted")
 			return
 		player.hand.append(player.deck.pop_back())
+		_visual_effects.append({"kind": "draw", "player": player.player_id})
 	for unit in player.units:
 		var tile_terrain: String = state.board.terrain_at(unit.position)
 		if tile_terrain == BoardState.FORT and unit.current_hp < unit.max_hp():
 			unit.current_hp += 1
+			_visual_effects.append({"kind": "heal", "tile": unit.position, "amount": 1})
 		elif tile_terrain == BoardState.FOREST and unit.card.faction == CardCatalog.VERDANT \
 				and unit.current_hp < unit.max_hp():
 			unit.current_hp = mini(unit.max_hp(), unit.current_hp + FactionRules.FOREST_HEAL)
+			_visual_effects.append({"kind": "heal", "tile": unit.position, "amount": FactionRules.FOREST_HEAL})
 	_tick_burn(player)
 	if state.winner_id >= 0:
 		return
+	if player.eliminated:
+		_end_turn()
+		return
 	_bloom_seeds(player)
 	var held: int = 0
-	for objective in BoardState.OBJECTIVE_POSITIONS:
+	for objective in state.board.objective_positions:
 		var occupant: UnitState = state.board.unit_at(objective)
 		if occupant != null and occupant.owner_id == player.player_id and not occupant.has_status("chill") \
-				and BoardState.objective_scores_for(objective, player.player_id):
+				and state.board.scores_for(objective, player.player_id):
 			held += 1
+			_visual_effects.append({"kind": "objective", "tile": objective})
 	player.victory_points += held
 	SupportResolver.process_start_of_turn(state)
 	state.events.append("Turn %d: %s begins (supply %d, +%d VP)." % [
@@ -572,8 +660,12 @@ func _start_turn() -> void:
 
 # ---- Setup ----
 
-func _initialize_match(decks: Array, armies: Array = [], setup_tiles: int = 0) -> void:
-	for player_id in range(2):
+func _initialize_match(decks: Array, armies: Array = [], setup_tiles: int = 0, player_count: int = 2) -> void:
+	state.setup_left.clear()
+	state.setup_used.clear()
+	for player_id in range(player_count):
+		state.setup_left.append(setup_tiles)
+		state.setup_used.append({})
 		var player := PlayerState.new()
 		player.player_id = player_id
 		player.display_name = "Player %d" % (player_id + 1)
@@ -591,7 +683,7 @@ func _initialize_match(decks: Array, armies: Array = [], setup_tiles: int = 0) -
 		var commander := UnitState.new()
 		commander.initialize(
 			state.create_instance_id(), CardCatalog.get_commander(player_id, player.army_id), player_id,
-			Vector2i(state.board.deployment_column(player_id), BoardState.COMMANDER_ROW), 0
+			state.board.commander_position(player_id), 0
 		)
 		state.board.place_unit(commander, commander.position)
 		player.commander = commander
@@ -601,7 +693,6 @@ func _initialize_match(decks: Array, armies: Array = [], setup_tiles: int = 0) -
 	state.turn_number = 1
 	if setup_tiles > 0:
 		state.phase = GameState.Phase.SETUP
-		state.setup_left = [setup_tiles, setup_tiles]
 		state.events.append("Terrain setup: each player places up to %d tiles." % setup_tiles)
 		return
 	_start_turn()

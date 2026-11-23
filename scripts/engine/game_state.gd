@@ -20,6 +20,7 @@ var activation_moved_tiles: int = 0
 var chain_count: int = 0
 # Verdant seeds: tile -> owner player id. A seed blooms at the start of its owner's turn if their unit stands on it.
 var seeds: Dictionary = {}
+var used_shrines: Dictionary = {}
 # Pre-game terrain setup: placements each player still has, and what they have used (terrain name -> count).
 var setup_left: Array[int] = [0, 0]
 var setup_used: Array[Dictionary] = [{}, {}]

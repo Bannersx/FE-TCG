@@ -16,6 +16,7 @@ const TYPE_COLORS: Dictionary = {
 
 var card: CardData
 var hover_tween: Tween
+var draw_tween: Tween
 
 signal inspected(card: CardData)
 
@@ -27,8 +28,11 @@ func _on_hover(entered: bool) -> void:
 	pivot_offset = size / 2.0
 	if hover_tween != null and hover_tween.is_valid():
 		hover_tween.kill()
-	hover_tween = create_tween()
-	hover_tween.tween_property(self, "scale", Vector2(1.06, 1.06) if entered else Vector2.ONE, 0.1)
+	if GameSettings.reduce_motion:
+		scale = Vector2.ONE
+	else:
+		hover_tween = create_tween()
+		hover_tween.tween_property(self, "scale", Vector2(1.06, 1.06) if entered else Vector2.ONE, 0.1)
 	if entered and card != null:
 		inspected.emit(card)
 

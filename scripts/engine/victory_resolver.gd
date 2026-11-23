@@ -2,6 +2,17 @@ class_name VictoryResolver
 extends RefCounted
 
 static func check_victory(state: GameState) -> int:
+	if state.players.size() == 4:
+		var survivors: Array[int] = []
+		for player in state.players:
+			if not player.eliminated:
+				survivors.append(player.player_id)
+		if survivors.size() == 1:
+			return survivors[0]
+		for player in state.players:
+			if not player.eliminated and player.victory_points >= 6:
+				return player.player_id
+		return -1
 	for player in state.players:
 		if player.commander == null or player.commander.current_hp <= 0:
 			return 1 - player.player_id

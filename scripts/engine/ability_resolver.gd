@@ -29,8 +29,8 @@ static func validate(state: GameState, player_id: int, card: CardData, target_id
 		return "Destination is impassable."
 	if card.tactic_effect == "reposition" and BoardState.distance(target.position, destination) > card.magnitude:
 		return "Destination is too far."
-	if card.tactic_effect == "retreat" and destination.x != board.deployment_column(player_id):
-		return "Destination must be in your deployment column."
+	if card.tactic_effect == "retreat" and not board.is_deployment_tile(player_id, destination):
+		return "Destination must be in your deployment zone."
 	return ""
 
 # Applies a validated tactic and returns the instance ids of defeated units.

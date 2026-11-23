@@ -1,13 +1,20 @@
 class_name BattleCell
 extends Button
 
-const OWNER_COLORS: Array[Color] = [Color(0.35, 0.65, 1.0), Color(1.0, 0.45, 0.40)]
+const OWNER_COLORS: Array[Color] = [Color(0.35, 0.65, 1.0), Color(1.0, 0.45, 0.40), Color(0.40, 0.85, 0.40), Color(0.85, 0.55, 1.0)]
 const TERRAIN_COLORS: Dictionary = {
 	BoardState.PLAIN: Color(0.24, 0.30, 0.22),
 	BoardState.FOREST: Color(0.12, 0.32, 0.16),
 	BoardState.FORT: Color(0.42, 0.36, 0.30),
 	BoardState.MOUNTAIN: Color(0.38, 0.38, 0.44),
 	BoardState.OBJECTIVE: Color(0.50, 0.42, 0.12),
+	BoardState.ROAD: Color(0.48, 0.38, 0.25),
+	BoardState.RIVER: Color(0.12, 0.35, 0.58),
+	BoardState.BRIDGE: Color(0.52, 0.43, 0.30),
+	BoardState.HIGH_GROUND: Color(0.48, 0.42, 0.24),
+	BoardState.RUINS: Color(0.37, 0.34, 0.39),
+	BoardState.LAVA: Color(0.60, 0.19, 0.10),
+	BoardState.SHRINE: Color(0.40, 0.28, 0.55),
 }
 const HIGHLIGHT_COLORS: Dictionary = {
 	"move": Color(0.25, 0.55, 0.95),
@@ -50,6 +57,7 @@ func _init() -> void:
 
 func show_state(terrain: String, unit: UnitState, highlight: String, seeded: bool = false) -> void:
 	var color: Color = TERRAIN_COLORS.get(terrain, Color.GRAY)
+	tooltip_text = "%s: %s" % [terrain, str(BoardState.TERRAIN_DESCRIPTIONS.get(terrain, ""))]
 	if highlight != "":
 		color = color.lerp(HIGHLIGHT_COLORS[highlight], 0.55)
 	for style_name in ["normal", "hover", "pressed", "disabled", "focus"]:
@@ -103,16 +111,25 @@ func cancel_effects() -> void:
 			child.queue_free()
 
 func flash(color: Color, delay: float = 0.0) -> void:
-	if effect_tween != null and effect_tween.is_valid():
-		effect_tween.kill()
-	modulate = Color.WHITE
-	effect_tween = create_tween()
+	if GameSettings.reduce_motion:
+		return
+	var overlay := ColorRect.new()
+	overlay.set_meta("floater", true)
+	overlay.color = Color(color.r, color.g, color.b, 0.45)
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.modulate.a = 0.0
+	add_child(overlay)
+	var tween: Tween = overlay.create_tween()
 	if delay > 0.0:
-		effect_tween.tween_interval(delay)
-	effect_tween.tween_property(self, "modulate", color, 0.12)
-	effect_tween.tween_property(self, "modulate", Color.WHITE, 0.3)
+		tween.tween_interval(delay)
+	tween.tween_property(overlay, "modulate:a", 1.0, 0.10)
+	tween.tween_property(overlay, "modulate:a", 0.0, 0.25)
+	tween.tween_callback(overlay.queue_free)
 
 func pulse(delay: float = 0.0) -> void:
+	if GameSettings.reduce_motion:
+		return
 	pivot_offset = size / 2.0
 	if effect_tween != null and effect_tween.is_valid():
 		effect_tween.kill()
@@ -138,6 +155,11 @@ func floating_text(message: String, color: Color, delay: float = 0.0) -> void:
 	var tween: Tween = floater.create_tween()
 	if delay > 0.0:
 		tween.tween_interval(delay)
+	if GameSettings.reduce_motion:
+		tween.tween_property(floater, "modulate:a", 1.0, 0.0)
+		tween.tween_interval(0.9)
+		tween.tween_callback(floater.queue_free)
+		return
 	tween.tween_property(floater, "modulate:a", 1.0, 0.05)
 	tween.set_parallel(true)
 	tween.tween_property(floater, "position:y", floater.position.y - 28.0, 0.7)

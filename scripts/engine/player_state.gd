@@ -15,6 +15,8 @@ var units: Array[UnitState] = []
 var commander: UnitState
 var army_id: String = ""
 var tactics_this_turn: int = 0
+var eliminated: bool = false
+var turns_started: int = 0
 # Ashen commander passive: this unit may act on the turn it was deployed.
 var haste_unit_id: String = ""
 

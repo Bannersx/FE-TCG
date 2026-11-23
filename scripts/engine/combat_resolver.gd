@@ -29,13 +29,18 @@ static func defense_value(board: BoardState, attacker: UnitState, defender: Unit
 	if attacker.weapon_type() == CardData.WeaponType.MAGIC:
 		value -= defender.card.defense
 	value += board.defense_bonus(defender.position)
+	if board.terrain_at(defender.position) == BoardState.RUINS and BoardState.distance(attacker.position, defender.position) > 1:
+		value += 1
 	if state != null:
 		value += SupportResolver.defense_bonus(state, defender)
 		value += FactionRules.defense_bonus(state, defender)
 	return value
 
 static func calculate_damage(board: BoardState, attacker: UnitState, defender: UnitState, state: GameState = null) -> int:
-	return maxi(0, attack_value(attacker, defender, state) - defense_value(board, attacker, defender, state))
+	var attack: int = attack_value(attacker, defender, state)
+	if board.terrain_at(attacker.position) == BoardState.HIGH_GROUND and BoardState.distance(attacker.position, defender.position) > 1:
+		attack += 1
+	return maxi(0, attack - defense_value(board, attacker, defender, state))
 
 static func in_range(attacker: UnitState, defender: UnitState) -> bool:
 	var dist: int = BoardState.distance(attacker.position, defender.position)

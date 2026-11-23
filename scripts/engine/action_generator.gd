@@ -9,13 +9,17 @@ static func legal_actions(state: GameState) -> Array[Dictionary]:
 	var pid: int = state.active_player_id
 	var player: PlayerState = state.players[pid]
 	match state.phase:
+		GameState.Phase.SETUP:
+			actions.append_array(GameEngine.terrain_options(state, pid))
+			actions.append({"type": "pass_setup"})
 		GameState.Phase.DEPLOYMENT:
 			_deployment_actions(state, player, actions)
 			_tactic_actions(state, player, actions)
 		GameState.Phase.COMMAND:
 			_command_actions(state, player, actions)
 			_tactic_actions(state, player, actions)
-	actions.append({"type": "advance_phase"})
+	if state.phase == GameState.Phase.DEPLOYMENT or state.phase == GameState.Phase.COMMAND:
+		actions.append({"type": "advance_phase"})
 	return actions
 
 static func _unique_hand(player: PlayerState) -> Array[CardData]:
@@ -32,10 +36,11 @@ static func _deployment_actions(state: GameState, player: PlayerState, actions: 
 	for card in _unique_hand(player):
 		match card.card_type:
 			CardData.CardType.UNIT:
-				for y in range(BoardState.HEIGHT):
-					var tile := Vector2i(state.board.deployment_column(pid), y)
-					if GameEngine.deploy_error(state, pid, card, tile) == "":
-						actions.append({"type": "deploy", "card_id": card.card_id, "tile": tile})
+				for y in range(state.board.height):
+					for x in range(state.board.width):
+						var tile := Vector2i(x, y)
+						if GameEngine.deploy_error(state, pid, card, tile) == "":
+							actions.append({"type": "deploy", "card_id": card.card_id, "tile": tile})
 			CardData.CardType.EQUIPMENT:
 				for unit in player.units:
 					if GameEngine.equip_error(state, pid, card, unit) == "":
@@ -55,8 +60,8 @@ static func _tactic_actions(state: GameState, player: PlayerState, actions: Arra
 				if unit.current_hp <= 0:
 					continue
 				if card.target_kind == "friendly_unit_tile":
-					for y in range(BoardState.HEIGHT):
-						for x in range(BoardState.WIDTH):
+					for y in range(state.board.height):
+						for x in range(state.board.width):
 							var tile := Vector2i(x, y)
 							if GameEngine.tactic_error(state, pid, card, unit.instance_id, tile) == "":
 								actions.append({"type": "play_tactic", "card_id": card.card_id, "target_id": unit.instance_id, "destination": tile})
@@ -76,9 +81,12 @@ static func _command_actions(state: GameState, player: PlayerState, actions: Arr
 		for tile: Vector2i in reachable:
 			if tile != active.position:
 				actions.append({"type": "move", "destination": tile})
-	for enemy in state.players[1 - pid].units:
-		if GameEngine.attack_error(state, active, enemy) == "":
-			actions.append({"type": "attack", "target_id": enemy.instance_id, "support": false})
-			if SupportResolver.find_attack_partner(state, active, enemy) != null:
-				actions.append({"type": "attack", "target_id": enemy.instance_id, "support": true})
+	for other in state.players:
+		if other.player_id == pid:
+			continue
+		for enemy in other.units:
+			if GameEngine.attack_error(state, active, enemy) == "":
+				actions.append({"type": "attack", "target_id": enemy.instance_id, "support": false})
+				if SupportResolver.find_attack_partner(state, active, enemy) != null:
+					actions.append({"type": "attack", "target_id": enemy.instance_id, "support": true})
 	actions.append({"type": "wait"})

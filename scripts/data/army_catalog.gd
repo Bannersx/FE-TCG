@@ -89,5 +89,5 @@ static func get_commander(army_id: String, seat: int) -> CardData:
 	commander.supply_cost = 0
 	commander.faction = str(info["faction"])
 	commander.rarity = "Commander"
-	commander.ability_text = "Defeat ends the match. Passive: %s" % info["passive"]
+	commander.ability_text = "Defeat eliminates its player. Passive: %s" % info["passive"]
 	return commander

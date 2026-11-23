@@ -7,14 +7,38 @@ The simulation (`scripts/engine`, `scripts/data`) is independent of the UI. Both
 
 Open this folder as a project in Godot 4.7.2 and press **F5**. The main menu offers:
 
-- **Two Players (same computer)** - a handoff screen hides the hand between turns.
-- **Play vs Computer (Easy / Normal)** - you are Player 1; the computer is Player 2.
-
+- **Local Play** - choose two-player hot-seat, four-player free-for-all, or play against the computer (Easy / Normal / Hard). Hot-seat matches show a handoff screen between turns.
+- **Online Play** - create or join a private room.
 - **Deck Builder** - filter the collection by category, class, weapon or name; click a collection card to add it, a deck card to remove it. A deck needs exactly 40 cards, max 3 copies each (the 22/10/8 unit/equipment/tactic mix is advice only). Decks save as card-id JSON in `user://decks/` (Godot's user data folder). Each seat can pick the starter deck or any saved legal deck on the main menu.
+
+## Online private matches (prototype)
+
+Online matches use an authoritative, headless Godot server over ENet/UDP. Start one on the server machine with:
+
+```text
+godot --headless --path . -- --server-port=7777
+```
+
+Allow inbound UDP traffic on the chosen port (default `7777`). Choose **Online Play**, then **Create Room** or **Join Room**, and enter the server address and port. Choose the same room size on each client: two players or four-player free-for-all. The first player creates a room with a code; the others join with that code. The match starts when all seats are filled. Players choose their own army and deck. The room creator's terrain-setup choice is used for the match. **Back** cancels a connection or leaves a waiting room. If any player disconnects, the room ends; reconnecting and replacing players are not yet supported.
+
+The server and all clients must use compatible builds, including for two-player rooms.
+
+For a first remote test, the server can run on your own PC. The easiest safer option for friends is a private mesh VPN (for example, Tailscale): install it on the server and player PCs, connect them to the same private network, and have clients use the server PC's VPN address. This avoids router port forwarding.
+
+Direct internet access is also possible: reserve a LAN address for the server PC, allow inbound **UDP** on the chosen port in its firewall, and forward that UDP port on your router to the PC. Players then use your public IP or a DNS name. If port forwarding does not work, your ISP may use carrier-grade NAT; use a VPN or a VPS instead. A changing public IP may also require dynamic DNS.
+
+This prototype has no public matchmaking, accounts, reconnect support, or hosting automation. The game server validates each submitted action and sends each player a filtered state that omits the opponent's hand and deck identities. Keep testing to trusted friends over a private VPN for now; this is not yet hardened as a public service.
+
+For a local two-client smoke test, start the server, then run these in two other terminals:
+
+```text
+godot --headless --path . --script res://tests/network_smoke_client.gd -- --address=127.0.0.1 --port=7777 --code=SMOKETST --name=first --create=true --submit=true --test-invalid=true
+godot --headless --path . --script res://tests/network_smoke_client.gd -- --address=127.0.0.1 --port=7777 --code=SMOKETST --name=second --create=false --wait-disconnect=true
+```
 
 ## Interface
 
-Hover a hand card or a unit to see it in the card inspector (stats, terrain, equipment, effects, bonds). Cells show HP bars and owner stripes; moves, attacks, deployments, tactics and promotions get short cosmetic animations, and the combat log is colour-coded. Animations never affect outcomes.
+Hover a hand card or a unit to see it in the card inspector (stats, terrain, equipment, effects, bonds). Player panels show commander HP, supply, victory points, card counts, and fallen units; scroll the panels if needed. On small screens, **Players** opens a larger, scrollable status view. Supply above the normal maximum is marked as a bonus. Cells show HP bars and owner stripes. Local and online actions have short cosmetic effects for movement, combat, cards, status and terrain effects, scoring, turns, and victory; the server remains authoritative and animations never affect outcomes. **Reduce motion** on the main menu or in a match replaces moving effects with static feedback. The setting lasts for the current game session. Updated clients and server are needed for online action animations.
 
 ## Play
 
@@ -29,10 +53,20 @@ Hover a hand card or a unit to see it in the card inspector (stats, terrain, equ
 - Defeated units go to the Fallen Zone (no revival); their equipment goes to the discard pile.
 - Win by defeating the enemy commander, holding objectives for 6 VP, or when the opponent cannot draw.
 
+### Four-player free-for-all
+
+- Four commanders start in the corners of a 9x9 board, with a separate 3x3 deployment zone around each corner. Five objectives form a cross around the center.
+- Players take turns clockwise by seat. Each player skips the draw on their first turn, then draws at the start of later turns.
+- Defeating a commander or failing to draw eliminates that player, removes their units and seeds, and skips their future turns. Eliminated players can watch until the match ends.
+- The last player standing wins, or any surviving player wins immediately by reaching 6 VP. Terrain setup, if enabled, proceeds through all four seats.
+- This is an experimental ruleset; the board and scoring have not yet been balanced through multiplayer playtests.
+
 ## Tests
 
 ```text
 godot --headless --path . --script res://tests/test_runner.gd
+godot --headless --path . --script res://tests/four_player_ui_smoke.gd
+godot --headless --path . --script res://tests/menu_ui_smoke.gd
 ```
 
 Covers the 30-card collection and deck legality, turns and supply, movement, combat, equipment, tactics, promotion, support, Fallen Zone, victory conditions, invalid-action rejection, and full AI-vs-AI matches (valid actions only, deterministic per seed).
@@ -47,7 +81,26 @@ Plays AI-vs-AI matches (`first`/`second` = `easy`, `normal` or `hard`) and print
 
 ## Terrain setup
 
-Tick "Pre-game terrain setup" in the menu (or pass `setup=3` to the simulator / `-Setup 3` to the matrix). Players alternate placing 3 terrain tiles each (Forest, Fort, Mountain, or erase to Plain; max 1 Mountain and 1 Fort per player) and may finish early. Objectives and the two deployment columns are locked, and a placement is rejected if it would block either commander from reaching every objective. The AI places terrain heuristically per army. With setup on, Normal-AI win rates shift (Ironcrest 35% vs Ashen, 47.5% vs Verdant; Ashen 35% vs Verdant), so the AI placement heuristic still favors Ashen.
+Tick "Pre-game terrain setup" in the menu (or pass `setup=3` to the simulator / `-Setup 3` to the matrix). Players alternate placing up to 3 terrain tiles each and may finish early. Each player may place at most 1 Mountain and 1 Fort; Plain erases a tile. Objectives and deployment zones are locked, and placements must leave every objective reachable by ground units from each commander. Existing default maps are unchanged; the new terrain is available through setup.
+
+| Terrain | Effect |
+| --- | --- |
+| Plain | Normal movement, no bonus. |
+| Forest | +1 defense; costs ground units 2 movement. Verdant ground units pay 1, and Verdant units heal 1 HP at the start of their turn. |
+| Fort | +2 defense; heals the occupant 1 HP at the start of its turn. |
+| Mountain | Impassable to ground units; flying units can enter. |
+| Road | A unit starting its activation on a road gains 1 movement for that activation. |
+| River | Costs ground units 2 movement; flying units pay 1. |
+| Bridge | Normal movement, including for ground units. Place it to make a crossing through river tiles. |
+| High Ground | +1 attack damage when attacking from more than one tile away. |
+| Ruins | +1 defense against attacks from more than one tile away. |
+| Lava | Ground units take 1 damage at the end of their owner's turn; flying units are immune. |
+| Shrine | Once per shrine per turn, a unit landing on it gains its owner 1 supply, up to 6. Landing via a tactic also counts; passing through during a move does not. A shrine is consumed for the turn even if supply is already full. |
+| Objective | An eligible unit holding it at the start of its owner's turn earns 1 victory point. |
+
+The AI's setup heuristic currently focuses on the original terrain and may not make strategic use of the new types.
+
+Online games using these terrain rules require an updated server and updated clients; older multiplayer builds are not compatible.
 
 ## Armies
 

@@ -95,7 +95,9 @@ func _unit_lines(card: CardData, unit: UnitState, state: GameState) -> PackedStr
 		lines.append("HP %d/%d  ATK %d  DEF %d  SPD %d" % [unit.current_hp, unit.max_hp(), unit.attack(), unit.defense(), unit.speed()])
 		lines.append("MOV %d  RNG %d  %s" % [unit.movement(), unit.attack_range(), "Flying" if card.movement_type == CardData.MovementType.FLYING else "Ground"])
 		if state != null:
-			lines.append("Terrain: %s (+%d DEF)" % [state.board.terrain_at(unit.position), state.board.defense_bonus(unit.position)])
+			var terrain: String = state.board.terrain_at(unit.position)
+			var terrain_defense: String = "+1 DEF vs ranged" if terrain == BoardState.RUINS else "+%d DEF" % state.board.defense_bonus(unit.position)
+			lines.append("Terrain: %s (%s)" % [terrain, terrain_defense])
 		var weapon_name: String = unit.weapon_item.card_name if unit.weapon_item != null else "none"
 		var accessory_name: String = unit.accessory_item.card_name if unit.accessory_item != null else "none"
 		lines.append("Weapon: %s | Accessory: %s" % [weapon_name, accessory_name])

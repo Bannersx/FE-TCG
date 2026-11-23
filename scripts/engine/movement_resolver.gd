@@ -4,6 +4,7 @@ extends RefCounted
 static func reachable_tiles(board: BoardState, unit: UnitState) -> Dictionary:
 	var distances: Dictionary = {unit.position: 0}
 	var frontier: Array[Vector2i] = [unit.position]
+	var movement: int = unit.movement() + (1 if board.terrain_at(unit.position) == BoardState.ROAD else 0)
 	while not frontier.is_empty():
 		var current: Vector2i = frontier.pop_front()
 		var current_cost: int = int(distances[current])
@@ -17,7 +18,7 @@ static func reachable_tiles(board: BoardState, unit: UnitState) -> Dictionary:
 			if step_cost < 0:
 				continue
 			var new_cost: int = current_cost + step_cost
-			if new_cost > unit.movement():
+			if new_cost > movement:
 				continue
 			if not distances.has(neighbor) or new_cost < int(distances[neighbor]):
 				distances[neighbor] = new_cost
